@@ -72,20 +72,55 @@ server is therefore `Normal`. The detected role is printed beside the phase.
 An explicit `-ServerType` asserts the expected role; a mismatch stops execution
 and cannot be used to bypass DC checks.
 
-| Menu phase | Normal server | Domain controller |
-|---|---|---|
-| **1) ReadinessCheck** | General readiness checks | General checks, then DC health in `PreMigration` mode |
-| **2) Prepare** | Driver preparation and state capture, then Tools service handling | Same preparation flow |
-| **3) ValidatePost** | Network restoration and post-migration checks | Same flow, then DC health in `PostMigration` mode |
+The menu now defaults to `-CheckLevel Migration`. Step 1 offers Migration or
+Deep; noninteractive use defaults to Migration. Step 2 preserves the choice and
+a recent (<24 h) before snapshot with the exact exported State folder, or collects
+fresh evidence before preparation when necessary. Step 3 reads the saved level.
+A conflicting explicit level is rejected rather than comparing different profiles.
 
-A blocking failure stops the phase before subsequent checks. DC health requires
-the ActiveDirectory module and appropriate permissions. By default, it checks
-all writable DCs in the current domain, so findings can concern other DCs too;
-RODCs are excluded from that default discovery. It checks services, replication,
-DNS, SYSVOL/NETLOGON, time and relevant events without repairing AD or changing
-DC roles. The phase modes label the reports; the main script does not automatically
-compare pre/post DC reports. Use the standalone `-CompareWith` option below for
-that comparison, or `-ComputerName` to select specific DCs.
+Migration checks one local server: source/target identity and NIC safeguards,
+network/routes, real storage health, local service state and (on DCs) local
+SYSVOL/NETLOGON paths and local incoming replication metadata per partner/partition.
+It does not enumerate the domain, force replication, run DCDiag or test external
+DNS forwarders. Deep adds local DC diagnostics and extended connectivity/VSS.
+`Test-MigrationReadiness.ps1` also accepts `-CheckLevel`; its default is Migration.
+
+`Test-MigrationAssessment.ps1` collects last-24-hour local EVTX exports (all levels)
+and structured before/after evidence. Per-log event comparisons are capped at 500
+warnings/errors; a capped or unreadable window is explicitly unverified. This is
+not event-log redaction: store raw exports with the same protection as server
+backups. No logs are cleared or AD/DNS settings repaired.
+
+Every local probe normally has a 20 s process-job limit; native repadmin/wevtutil
+calls have a 12 s limit. Only diagnostic processes launched by the collector may
+be terminated. The Deep DC child is limited to 300 s. Durations and missing data
+are recorded; timeouts never imply a healthy result. These limits do not wrap
+network mutations, Tools uninstall, driver installation or an explicit DeepScan.
+
+Reports are separate: `Reports/PostMigrationReport.*` describes migration checks
+and actions (`summary.migrationChecksStatus`), while `Assessment/Report.*`,
+`Comparison.json` and `AssessmentSummary.json` describe operational drift.
+Classifications are ExistingDeviation, NewDeviation, Recovered, NotVerified,
+NewEvent and RecurringEvent. Repeated message signatures do not prove identical
+causes; new events remain review items. Copied events require continuous log
+identity/record sequence. Missing replication rows or unchanged last-success
+values never imply recovery. Structured replication CSV currently requires
+recognizable English column names; otherwise raw output is retained as unverified.
+
+Baseline/level are stored at `State/MigrationAssessment/Selection.json` with hashes
+of `PreMigrationState.json` and `Before/Snapshot.json`. Before evidence must have
+the same computer, stage, level and schema. Legacy State folders without a manifest
+still work with Migration; their operational comparison is explicitly unverified.
+`-WhatIf` does not create evidence or invoke diagnostic children in preparation/
+post-migration. Existing prerequisite/identity/rollback failures still stop changes.
+Existing DC deviations and Deep diagnostic failures produce review warnings, not
+an instruction to repair AD before moving the VM.
+
+For domain-wide diagnostics, explicitly run the standalone
+`Test-DCMigrationHealth.ps1`. Without `-ComputerName` it still discovers all writable
+DCs. With an explicit server list it skips the domain-wide `/replsummary` sweep.
+The menu's Deep profile always passes the local computer explicitly. Deep requires
+RSAT/ActiveDirectory; the local standard collector does not.
 
 The workflow remains three phases: **1) ReadinessCheck**, **2) Prepare** and
 **3) ValidatePost**, followed by **4) Exit**. Prepare already calls the exporter;
@@ -572,6 +607,7 @@ From the repository root, run the portable regression tests:
 
 ```powershell
 .\tests\Test-MigrationLogic.ps1
+.\tests\Test-MigrationAssessment.ps1
 ```
 
 The suite parses every migration script and tests safety/decision logic with

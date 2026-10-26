@@ -635,6 +635,7 @@ try {
         Assert-True ($summary.overallStatus -eq 'PASS') 'Unexpected preview summary.'
     }
     Test-Case 'Text HTML and JSON reports render captured array results' {
+        $RootPath=$script:TempRoot
         $WhatIfPreference=$false
         $SchemaVersion='1.0';$StateDirectory='test-state';$Mode='ValidateOnly'
         $StateJsonPath='before.json';$PostStatePath='after.json';$RollbackPath='rollback.json'
@@ -924,6 +925,8 @@ try {
         Assert-Throws { Test-MigrationInstallerTrust -Path 'fixture.exe' -ExpectedSha256 'WRONG' } 'SHA-256 mismatch'
     }
     Test-Case 'Normal Prepare captures and disables Tools by default without installer override flags' {
+        function New-SourceMigrationAssessment { [pscustomobject]@{checkLevel='Migration'} }
+        function Save-SourceMigrationAssessment { param($Selection) }
         $script:PrepareCalls=@()
         function Invoke-CheckedMigrationScript { param($Name,$Arguments,$WarningCodes) $script:PrepareCalls += [pscustomobject]@{name=$Name;arguments=$Arguments} }
         function Write-MigrationCaptureSummary { }
@@ -932,6 +935,8 @@ try {
         Assert-True ($script:PrepareCalls[1].name -eq 'Export-MigrationState.ps1' -and $script:PrepareCalls[1].arguments.DisableVMwareTools -and -not $script:PrepareCalls[1].arguments.Confirm) 'The original source service workflow was not retained.'
     }
     Test-Case 'Prepare still supports keeping VMware services unchanged explicitly' {
+        function New-SourceMigrationAssessment { [pscustomobject]@{checkLevel='Migration'} }
+        function Save-SourceMigrationAssessment { param($Selection) }
         $script:PrepareCalls=@()
         function Invoke-CheckedMigrationScript { param($Name,$Arguments,$WarningCodes) $script:PrepareCalls += [pscustomobject]@{name=$Name;arguments=$Arguments} }
         function Write-MigrationCaptureSummary { }

@@ -1036,7 +1036,11 @@ try {
     Write-Host "DCs tested: $($targetDCs.Count)"
     Write-Host ''
 
-    $repadminSummaryRaw = Invoke-ExternalCommand -FilePath 'repadmin.exe' -ArgumentList @('/replsummary') -TimeoutSeconds 90
+    $repadminSummaryRaw = if ($ComputerName) {
+        'Domain-wide summary not requested. See the selected server replication reports.'
+    } else {
+        Invoke-ExternalCommand -FilePath 'repadmin.exe' -ArgumentList @('/replsummary') -TimeoutSeconds 90
+    }
     Set-Content -LiteralPath (Join-Path $rawFolder 'repadmin-summary.txt') -Value $repadminSummaryRaw -Encoding UTF8
 
     $dcResults = @()

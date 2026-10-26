@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Runs pre-migration checks, source preparation, or post-Firstboot validation.
 .DESCRIPTION
@@ -18,12 +18,16 @@
     Enabled by default in Prepare to preserve the original migration workflow.
     Captures original service state before stopping/disabling Tools on the source.
     Use -DisableVMwareTools:$false to keep source services unchanged.
+.PARAMETER CheckLevel
+    Migration (default) collects bounded local evidence. Deep adds diagnostics
+    for this server only. Prepare saves the level with State; ValidatePost reuses it.
 #>
 #Requires -Version 5.1
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
     [ValidateSet('ReadinessCheck', 'Prepare', 'ValidatePost')][string]$Phase,
     [ValidateSet('Auto', 'DomainController', 'Normal')][string]$ServerType = 'Auto',
+    [ValidateSet('Migration', 'Deep')][string]$CheckLevel = 'Migration',
     [ValidateSet('Install', 'FirstbootManaged')][string]$DriverPreparation = 'Install',
     [string]$StateDirectory = '',
     [string]$AdapterMappingPath = '',
@@ -41,7 +45,43 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Migration.Common.ps1')
+. (Join-Path $PSScriptRoot 'Migration.Assessment.ps1')
 $script:PhaseExitCode = 0
+$script:InteractiveMenu = -not $Phase
+$script:LevelExplicit = $PSBoundParameters.ContainsKey('CheckLevel')
+
+function New-SourceMigrationAssessment {
+    param([switch]$ReuseRecent)
+    $selection=Get-MigrationAssessmentSelection
+    if ($ReuseRecent -and $selection -and (Test-Path -LiteralPath (Join-Path $selection.outputDirectory 'Snapshot.json')) -and
+        ([datetime]::UtcNow - (ConvertTo-AssessmentUtc $selection.capturedAtUtc)).TotalHours -ge 0 -and
+        ([datetime]::UtcNow - (ConvertTo-AssessmentUtc $selection.capturedAtUtc)).TotalHours -lt 24 -and
+        (-not $script:LevelExplicit -or $selection.checkLevel -eq $CheckLevel)) {
+        $before=Read-MigrationAssessmentSnapshot (Join-Path $selection.outputDirectory 'Snapshot.json')
+        if ($before.computerName -ieq $env:COMPUTERNAME -and $before.stage -eq 'Before' -and $before.checkLevel -eq $selection.checkLevel) { return $selection }
+        Write-Warning 'The previous evidence identity/level does not match; collecting a fresh local before snapshot.'
+    }
+    if ($ReuseRecent -and $selection -and -not $script:LevelExplicit) { $CheckLevel=[string]$selection.checkLevel }
+    $root=Join-Path 'C:\' ('Rutin_migration_'+(Get-Date -Format 'yyyy-MM-dd'))
+    $output=Join-Path $root ('MigrationAssessment_Before_'+[guid]::NewGuid().ToString('N'))
+    Invoke-CheckedMigrationScript 'Test-MigrationAssessment.ps1' @{Stage='Before';OutputDirectory=$output;CheckLevel=$CheckLevel}
+    $selection=[pscustomobject]@{computerName=$env:COMPUTERNAME;checkLevel=$CheckLevel;capturedAtUtc=[datetime]::UtcNow.ToString('o');outputDirectory=$output}
+    $selection | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'MigrationAssessmentSelection.json') -Encoding UTF8
+    return $selection
+}
+
+function Save-SourceMigrationAssessment {
+    param($Selection)
+    $state=Resolve-MigrationStateDirectory
+    $destination=Join-Path $state 'MigrationAssessment'
+    New-Item -ItemType Directory -Path $destination -ErrorAction Stop | Out-Null
+    Copy-Item -LiteralPath $Selection.outputDirectory -Destination (Join-Path $destination 'Before') -Recurse -ErrorAction Stop
+    # Bind evidence to this exact export; post-migration never follows source absolute paths.
+    $Selection | Add-Member NoteProperty captureSha256 (Get-FileHash (Join-Path $state 'PreMigrationState.json') -Algorithm SHA256).Hash -Force
+    $Selection | Add-Member NoteProperty beforeSha256 (Get-FileHash (Join-Path $destination 'Before\Snapshot.json') -Algorithm SHA256).Hash -Force
+    $Selection | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $destination 'Selection.json') -Encoding UTF8
+    Write-Host "Saved before evidence and check level $($Selection.checkLevel) with capture: $destination"
+}
 
 function Invoke-CheckedMigrationScript {
     param([string]$Name, [hashtable]$Arguments = @{}, [int[]]$WarningCodes = @(1))
@@ -89,6 +129,15 @@ try {
             default { throw 'Invalid phase selection.' }
         }
     }
+    if ($script:InteractiveMenu -and $Phase -eq 'ReadinessCheck' -and -not $script:LevelExplicit) {
+        Write-Host 'Kontrollnivå: 1) Migreringskontroll (standard)  2) Fördjupad kontroll av denna server'
+        switch (Read-Host 'Val [1]') {
+            '2' { $CheckLevel='Deep' }
+            { $_ -in @('','1') } { $CheckLevel='Migration' }
+            default { throw 'Invalid check level selection.' }
+        }
+        $script:LevelExplicit=$true
+    }
     if ($StateDirectory -and $Phase -ne 'ValidatePost') { throw '-StateDirectory selects a restore baseline and is only supported with ValidatePost.' }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -99,17 +148,16 @@ try {
     Write-Host "Phase: $Phase. Detected server type: $role."
     switch ($Phase) {
         'ReadinessCheck' {
-            $readinessArgs = @{}
+            $readinessArgs = @{CheckLevel=$CheckLevel}
             if ($DriverPreparation -eq 'FirstbootManaged') { $readinessArgs.StorageDriverMode = 'RestoreInjected' }
             Invoke-CheckedMigrationScript 'Test-MigrationReadiness.ps1' $readinessArgs
-            if ($role -eq 'DomainController') {
-                Invoke-CheckedMigrationScript 'Test-DCMigrationHealth.ps1' @{ Mode = 'PreMigration' }
-            }
+            if (-not $WhatIfPreference) { $null=New-SourceMigrationAssessment }
         }
         'Prepare' {
             $prepareAction = 'Prepare the source VM and capture migration state'
             if ($DisableVMwareTools) { $prepareAction += ', then stop and disable VMware Tools services (preserving original service state)' }
             if ($PSCmdlet.ShouldProcess($env:COMPUTERNAME, $prepareAction)) {
+                $assessment=New-SourceMigrationAssessment -ReuseRecent
                 if ($DriverPreparation -eq 'Install') {
                     $driverArgs = @{}
                     if ($ExpectedInstallerSha256) { $driverArgs.ExpectedInstallerSha256 = $ExpectedInstallerSha256 }
@@ -124,10 +172,15 @@ try {
                 if ($DisableVMwareTools) { $exportArgs.DisableVMwareTools = $true; $exportArgs.Confirm = $false }
                 Invoke-CheckedMigrationScript 'Export-MigrationState.ps1' $exportArgs -WarningCodes @(50)
                 Write-MigrationCaptureSummary
+                Save-SourceMigrationAssessment $assessment
             } elseif (-not $WhatIfPreference) { $script:PhaseExitCode = 1 }
         }
         'ValidatePost' {
             $selectedState = Resolve-MigrationStateDirectory -StateDirectory $StateDirectory
+            $capturedLevel=Get-MigrationCapturedAssessmentLevel $selectedState
+            if ($script:LevelExplicit -and $CheckLevel -ne $capturedLevel) { throw 'Check level differs from the before capture. Run extra deep diagnostics separately to preserve comparable assessment levels.' }
+            $CheckLevel=$capturedLevel
+            Write-Host "Kontrollnivå från insamlingen: $CheckLevel"
             # Also checked by the standalone restore script; never race Firstboot.
             $firstboot = Assert-MigrationFirstbootComplete -FirstbootNotUsed:$FirstbootNotUsed
             Write-Host "Firstboot status: $($firstboot.state)"
@@ -138,7 +191,7 @@ try {
                 $script:PhaseExitCode = 1
                 break
             }
-            $restoreArgs = @{ Mode = 'Full'; StateDirectory = $selectedState; Confirm = $false }
+            $restoreArgs = @{ Mode = 'Full'; StateDirectory = $selectedState; Confirm = $false; CheckLevel=$CheckLevel }
             if ($AdapterMappingPath) { $restoreArgs.AdapterMappingPath = $AdapterMappingPath }
             if ($FirstbootNotUsed) { $restoreArgs.FirstbootNotUsed = $true }
             if ($RepairOfflineDisks) { $restoreArgs.RepairOfflineDisks = $true }
@@ -149,9 +202,6 @@ try {
             if ($PSBoundParameters.ContainsKey('MigrationTimestamp')) { $restoreArgs.MigrationTimestamp = $MigrationTimestamp.ToString('o') }
             if ($WhatIfPreference) { $restoreArgs.WhatIf = $true }
             Invoke-CheckedMigrationScript 'Restore-And-TestMigrationState.ps1' $restoreArgs
-            if ($role -eq 'DomainController' -and -not $WhatIfPreference) {
-                Invoke-CheckedMigrationScript 'Test-DCMigrationHealth.ps1' @{ Mode = 'PostMigration' }
-            }
         }
     }
     if ($WhatIfPreference) { Write-Host "$Phase preview completed; no preparation or restoration was applied." }

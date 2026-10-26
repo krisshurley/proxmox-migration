@@ -70,28 +70,48 @@ Phase: ReadinessCheck. Detected server type: DomainController.
 
 Du använder samma menyval oavsett servertyp:
 
-Menyval: 1) ReadinessCheck
-Extra hantering för en domänkontrollant: Efter de vanliga förkontrollerna körs en
-särskild DC-hälsokontroll.
+Kontrollnivå: migreringskontroll eller fördjupad kontroll
+---------------------------------------------------------
 
-Menyval: 2) Prepare
-Extra hantering för en domänkontrollant: Samma förberedelse som för en vanlig server.
+Vid menyval 1 väljer du nivå. Enter väljer Migreringskontroll (Migration), som fokuserar
+på servern som flyttas. Fördjupad kontroll (Deep) lägger till fullständig DCDiag/DNS och
+fler funktionskontroller på just denna server. Den vanliga nätverks-, Firstboot-,
+identitets- och lagringssäkerheten är densamma.
 
-Menyval: 3) ValidatePost
-Extra hantering för en domänkontrollant: Efter nätverksåterställningen och de vanliga
-efterkontrollerna körs DC-hälsokontrollen igen.
+Nivån och före-underlaget sparas i steg 1. Steg 2 kopierar dem till
+State\MigrationAssessment tillsammans med exporten. Om steg 1 saknas eller underlaget är
+äldre än 24 timmar gör Prepare en ny lokal insamling före ändringar. Steg 3 återanvänder
+nivån automatiskt. Försök inte byta nivå mellan före och efter; kör extra djupdiagnostik
+separat om den behövs.
 
+.\Migrate-VmwareToProxmox.ps1 -Phase ReadinessCheck -CheckLevel Migration
+.\Migrate-VmwareToProxmox.ps1 -Phase ReadinessCheck -CheckLevel Deep
 
-Om ett tidigare moment får ett blockerande fel stoppas fasen innan nästa moment.
-DC-kontrollerna kräver ActiveDirectory-modulen och rätt behörigheter. De granskar bland
-annat tjänster, AD-replikering, DNS och SYSVOL/NETLOGON och reparerar inte AD.
+Standardinsamlingen sparar lokala automatiska/centrala tjänster och, för DC,
+SYSVOL/NETLOGON inklusive deras lokala katalogers tillgänglighet samt inkommande
+replikeringsstatus per partner och partition. Den gör ingen domäninventering och
+framtvingar ingen replikering. Avsaknad av replikeringsrader redovisas som ej
+verifierat, inte som bevis för att domänen bara har en DC.
 
-Som standard granskas alla skrivbara domänkontrollanter i aktuell domän. Rapporten kan
-därför visa befintliga problem på andra DC:er än den som flyttas. RODC:er ingår inte i
-detta standardurval. Före- och efterkontrollerna ger separata rapporter; en automatisk
-jämförelse mellan DC-rapporterna ingår inte i menykörningen. Se README
-(README.md#automatic-server-role-detection-and-dc-checks) för tekniska detaljer och hur
-DC-kontrollen kan köras separat med eget urval eller jämförelse.
+System- och Application-loggarna exporteras i EVTX-format för senaste 24 timmarna. För
+DC exporteras också Directory Service, DFS Replication och DNS Server. Exporten
+innehåller alla nivåer, så lyckad återhämtning kan granskas. Jämförelsen sammanfattar
+högst 500 varnings-/felhändelser per logg; om fler finns markeras underlaget som
+begränsat. Vid behov granskar driftansvarig EVTX-filerna.
+
+Lokala insamlingsmoment har normalt 20 sekunders tidsgräns var. Native export/ repadmin
+begränsas till 12 sekunder. Tiden per moment skrivs i rapporten. Den fördjupade
+DC-körningen har en total gräns på 300 sekunder. Timeout eller saknad åtkomst är ej
+verifierat. Inga migreringsåtgärder eller drivrutinsinstallationer avslutas av dessa
+diagnostikgränser.
+
+Full domänkontroll är separat och valbar, exempelvis för driftansvarig:
+
+.\Test-DCMigrationHealth.ps1 -Mode PreMigration
+
+Det fristående kommandot ovan inventerar alla skrivbara DC:er. Använd -ComputerName DC05
+för en enda DC. Fördjupad DC-diagnostik kräver fortfarande ActiveDirectory-modulen;
+standardinsamlingen kräver den inte.
 
 Om betrodda, nedladdade filer är blockerade kan du avblockera dem i skriptmappen:
 
@@ -112,8 +132,9 @@ Steg 1: kontrollera original-VM:en i VMware
 Starta menyn och välj 1) ReadinessCheck.
 
 Kontrollen granskar bland annat nätverkskort, lagringsdrivrutiner, väntande omstart,
-diskar, filsystem, VSS och relevanta fel i Windows-loggarna. Serverrollen identifieras
-automatiskt. Domänkontrollanter får även särskilda kontroller.
+diskar och filsystem. Dessutom sparas lokalt driftunderlag och händelseloggar. VSS,
+fullständig DCDiag och omfattande DNS-tester ingår i den fördjupade nivån. Serverrollen
+identifieras automatiskt.
 
 Resultat: PASS
 Så hanterar du det: Kontrollen är godkänd.
@@ -140,7 +161,10 @@ Steg 2: förbered original-VM:en i VMware
 
 Starta menyn igen och välj 2) Prepare.
 
-Bekräfta åtgärden när du får frågan. Prepare gör ändringar på källan:
+Prepare återanvänder ett före-underlag yngre än 24 timmar från steg 1, eller samlar in
+ett nytt före-underlag innan ändringarna. Vald nivå och underlaget kopieras till
+exportens State\MigrationAssessment. Ta med hela State-mappen i backupen. Bekräfta
+åtgärden när du får frågan. Prepare gör ändringar på källan:
 
 1. Installerar det medföljande VirtIO-paketet och förbereder lagringsdrivrutinen.
 2. Exporterar bland annat aktiva nätverkskort, IPv4-adresser, DNS, gateways, routes,
@@ -337,6 +361,45 @@ detta fall.
 
 Läs resultatet och verifiera serverns funktion
 ----------------------------------------------
+
+Steg 3 skriver två kompletterande resultat:
+
+- Reports\PostMigrationReport.html: migreringskontroller och genomförda åtgärder, med
+  separat fält migrationChecksStatus i JSON-rapporten.
+- Assessment\Report.html och AssessmentSummary.json: driftjämförelse och
+  eventloggsexporter. Baseline finns i vald exports State\MigrationAssessment\Before.
+
+Klassificering: Befintlig avvikelse
+Tolkning: Fanns redan före; dokumenteras utan automatisk reparation.
+
+Klassificering: Ny avvikelse
+Tolkning: Tjänst/delning/replikering har försämrats och behöver bedömas.
+
+Klassificering: Återhämtad
+Tolkning: En tidigare observerad avvikelse har ett fungerande aktuellt resultat.
+
+Klassificering: Ej verifierat
+Tolkning: Underlag saknas, har timeout, är begränsat eller kan inte jämföras.
+
+Klassificering: Ny/återkommande logghändelse
+Tolkning: Behöver bedömas; samma ID bevisar inte samma orsak.
+
+
+Jämförelsen använder loggens identitet, record-ID, tidsstämpel, källa, ID, nivå och
+meddelandetext för att skilja medföljande historik från nya/återkommande händelser.
+Rensad/omskapad logg ger ej verifierat underlag. Frånvaro av ett nytt fel är inte ensamt
+ett bevis för återhämtning. Replikering utan ny registrerad lyckad tid redovisas som ej
+verifierad; inget synkroniseringsförsök framtvingas.
+
+Befintliga driftavvikelser och misslyckad djupdiagnostik ger varning i arbetsflödet,
+inte automatiska AD-reparationer eller stopp bara för ett gammalt DC-fel. Verkliga
+migreringsfel, såsom osäker NIC-mappning eller misslyckad nätverksåterställning,
+behåller sina stopp. Nya driftavvikelser kräver bedömning innan flytten godkänns.
+
+Äldre exporter utan detta driftunderlag fungerar med nivån Migration. Rapporten visar ej
+verifierat för före/efter; den hittar inte på ett friskt utgångsläge. Oförenligt eller
+ändrat nytt underlag stoppas via datoridentitet och SHA-256-bindning mot just den valda
+exporten. Manuell applikationsverifiering behövs fortfarande.
 
 Läs slutraden Overall result och kontrollera särskilt:
 

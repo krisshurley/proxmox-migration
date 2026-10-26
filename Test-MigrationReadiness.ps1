@@ -40,6 +40,7 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
+    [ValidateSet('Migration','Deep')][string]$CheckLevel='Migration',
     [ValidateRange(1, 720)]
     [int]$EventLookbackHours = 24,
     [ValidateSet('Installed', 'RestoreInjected')]
@@ -56,6 +57,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Migration.Common.ps1')
+. (Join-Path $PSScriptRoot 'Migration.Assessment.ps1')
 
 function New-MigrationPath {
     param([string]$ScriptName)
@@ -376,10 +378,10 @@ function Test-FileSystems {
         $volumes = @(Get-Volume -ErrorAction Stop | Where-Object { $_.DriveLetter -and $_.FileSystem -eq 'NTFS' })
         foreach ($volume in $volumes) {
             $drive = "$($volume.DriveLetter):"
-            $output = & fsutil dirty query $drive 2>&1
+            $output = Invoke-AssessmentNative 'fsutil.exe' @('dirty','query',$drive) 20
             $text = ($output -join ' ').Trim()
             $checked += "$drive NTFS: $text"
-            if ($LASTEXITCODE -ne 0 -or $text -match '(?i)(is dirty|cannot|failed|error)') { $issues += "$($drive): $text" }
+            if ($text -match '(?i)(is dirty|cannot|failed|error)') { $issues += "$($drive): $text" }
         }
         if ($volumes.Count -eq 0) { Add-CheckResult 'Filesystem checks' 'NOT_CHECKED' 'No drive-letter NTFS volumes were available.' | Out-Null }
         elseif ($issues.Count -gt 0) { Add-CheckResult 'Filesystem checks' 'WARNING' 'One or more NTFS volumes require review; only the read-only dirty-bit query was run.' ($checked + $issues) | Out-Null }
@@ -406,8 +408,8 @@ function Test-EventLogs {
 
 function Test-VssHealth {
     Invoke-ReadOnlyCheck 'VSS health' {
-        $output = @(& vssadmin list writers 2>&1)
-        if ($LASTEXITCODE -ne 0) { Add-CheckResult 'VSS health' 'NOT_CHECKED' 'vssadmin could not enumerate VSS writers.' -ErrorMessage ($output -join ' ') | Out-Null; return }
+        $output = @((Invoke-AssessmentNative 'vssadmin.exe' @('list','writers') 20) -split '\r?\n')
+        if (@($output | Where-Object { $_ -match 'State:\s*\[\d+\]' }).Count -eq 0) { Add-CheckResult 'VSS health' 'NOT_CHECKED' 'No recognizable VSS writer states (empty or localized output).' | Out-Null; return }
         $bad = @($output | Where-Object { $_ -match 'State: \[(?!1\])|Last error: (?!No error)' })
         if ($bad.Count -gt 0) { Add-CheckResult 'VSS health' $(if ($FailedVssWritersAreFailure) { 'FAIL' } else { 'WARNING' }) 'One or more VSS writers are not stable or report an error.' $bad | Out-Null }
         else { Add-CheckResult 'VSS health' 'PASS' 'VSS writers reported stable with no errors.' | Out-Null }
@@ -475,8 +477,7 @@ try {
     Test-ServiceHealth
     Test-DiskHealth
     Test-FileSystems
-    Test-EventLogs
-    Test-VssHealth
+    if ($CheckLevel -eq 'Deep') { Test-EventLogs; Test-VssHealth }
     Test-WindowsUpdate
     Get-SystemIdentity
     $summary = Write-Reports

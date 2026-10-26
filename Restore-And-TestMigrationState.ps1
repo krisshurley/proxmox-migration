@@ -58,6 +58,7 @@ param(
     [string]$AdapterMappingPath = '',
     [ValidateSet('ValidateOnly', 'ApplyNetwork', 'CompareOnly', 'Full', 'VmwareUninstall')]
     [string]$Mode = 'ValidateOnly',
+    [ValidateSet('Migration','Deep')][string]$CheckLevel = 'Migration',
     [switch]$Force,
     [string]$DnsTestHost = '',
     [string]$ApplicationConfigPath = '',
@@ -71,6 +72,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Migration.Common.ps1')
+. (Join-Path $PSScriptRoot 'Migration.Assessment.ps1')
 
 function New-MigrationPath {
     param([string]$ScriptName)
@@ -107,7 +109,7 @@ $ReportHtmlPath = Join-Path $ReportDirectory 'PostMigrationReport.html'
 $ReportTextPath = Join-Path $ReportDirectory 'PostMigrationReport.txt'
 $SchemaVersion = '1.0'
 # Fixed internal build stamp to verify which copy is deployed on a target machine.
-$CodeRevision = '2026-10-23.9'
+$CodeRevision = '2026-10-26.1'
 $script:LogWriter = $null
 $script:Results = New-Object System.Collections.ArrayList
 $script:Actions = New-Object System.Collections.ArrayList
@@ -1083,14 +1085,14 @@ function Test-StorageControllerHealth {
 }
 function Test-FilesystemAndEvents {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
-    param()
+    param([switch]$SkipEventLogs)
     $volumes = @(Get-Volume -ErrorAction Stop | Where-Object { $_.DriveLetter -and $_.FileSystem -eq 'NTFS' })
     if ($volumes.Count -eq 0) { Add-Result 'Filesystem health' 'NOT_CHECKED' 'No drive-letter NTFS volumes were available.' }
     foreach ($volume in $volumes) {
         $drive = "$($volume.DriveLetter):"
-        $text = (& fsutil.exe dirty query $drive 2>&1) -join ' '
-        if ($LASTEXITCODE -ne 0) { Add-Result 'Filesystem health' 'NOT_CHECKED' "Dirty-bit query failed for $drive." @($text) }
-        elseif ($text -match '(?i)\bis\s+(?:not\s+)?dirty\b') {
+        try { $text = Invoke-AssessmentNative 'fsutil.exe' @('dirty','query',$drive) 20 }
+        catch { Add-Result 'Filesystem health' 'NOT_CHECKED' "Dirty-bit query failed for $drive." @($_.Exception.Message); continue }
+        if ($text -match '(?i)\bis\s+(?:not\s+)?dirty\b') {
             $dirty = $text -notmatch '(?i)\bis\s+not\s+dirty\b'
             Add-Result 'Filesystem health' $(if ($dirty) { 'WARNING' } else { 'PASS' }) "$drive : $text"
         } else { Add-Result 'Filesystem health' 'NOT_CHECKED' "Unrecognized or localized fsutil output for $drive." @($text) }
@@ -1105,6 +1107,7 @@ function Test-FilesystemAndEvents {
         }
     }
     Test-StorageControllerHealth
+    if ($SkipEventLogs) { return } # Bounded, paired event collection runs in the assessment.
     $since = if ($MigrationTimestamp) { $MigrationTimestamp } else { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime }
     $events = @()
     foreach ($log in @('System', 'Application')) {
@@ -1150,12 +1153,12 @@ function Test-Connectivity {
     }
 }
 function Test-PostMigrationVss {
-    $output = @(& vssadmin.exe list writers 2>&1)
-    if ($LASTEXITCODE -ne 0) { Add-Result 'VSS writers' 'NOT_CHECKED' 'vssadmin could not enumerate writers.'; return }
+    try { $output = @((Invoke-AssessmentNative 'vssadmin.exe' @('list','writers') 20) -split '\r?\n') }
+    catch { Add-Result 'VSS writers' 'NOT_CHECKED' $_.Exception.Message; return }
     $states = @($output | Where-Object { $_ -match '(?i)State:\s*\[\d+\]' })
     if ($states.Count -eq 0) { Add-Result 'VSS writers' 'NOT_CHECKED' 'No recognizable VSS writer states returned (possibly localized output).'; return }
     $bad = @($output | Where-Object { $_ -match '(?i)State:\s*\[(?!1\])|Last error:\s*(?!No error\s*$)\S' })
-    if ($bad.Count) { Add-Result 'VSS writers' 'FAIL' 'One or more writers report an unstable state or error.' $bad }
+    if ($bad.Count) { Add-Result 'VSS writers' 'WARNING' 'Operational diagnostic: one or more writers report an unstable state or error; review separately from migration actions.' $bad }
     else { Add-Result 'VSS writers' 'PASS' 'Recognized VSS writers report stable state and no error.' }
 }
 function Get-VMwareToolsProducts {
@@ -1420,15 +1423,47 @@ function Get-Summary {
     $status = if ($counts.FAIL -gt 0) { 'FAIL' } elseif ($counts.WARNING -gt 0 -or $counts.NOT_CHECKED -gt 0) { 'WARNING' } else { 'PASS' }
     return [ordered]@{ overallStatus = $status; counts = $counts; blockingFailures = @($script:Results | Where-Object state -eq 'FAIL' | ForEach-Object { "$($_.name): $($_.summary)" }); warnings = @($script:Results | Where-Object { $_.state -eq 'WARNING' -or $_.state -eq 'NOT_CHECKED' } | ForEach-Object { "$($_.name): $($_.summary)" }); manualActions = @($script:Actions | Where-Object { $_.state -match 'MANUAL|FAILED' } | ForEach-Object { $_.summary }) }
 }
+function Invoke-PostMigrationAssessment {
+    if ($WhatIfPreference) { return }
+    $folder=Join-Path $StateDirectory 'MigrationAssessment'
+    $output=Join-Path $RootPath 'Assessment'
+    $code=Invoke-MigrationChildScript -Path (Join-Path $PSScriptRoot 'Test-MigrationAssessment.ps1') -Arguments @{
+        Stage='After';OutputDirectory=$output;BaselinePath=(Join-Path $folder 'Before\Snapshot.json');CheckLevel=$CheckLevel
+    }
+    $state=if ($code -eq 0) {'PASS'} elseif ($code -eq 1) {'WARNING'} else {'NOT_CHECKED'}
+    Add-Result 'Operational before/after assessment' $state "Operational evidence is separate from migration actions. See $output\Report.html (collector exit $code)."
+    Add-Action 'Operational evidence' 'REPORT' "Before/after report and local EVTX exports: $output."
+}
+function Test-BoundedMigrationConnectivity {
+    $ports=@()
+    if ($ApplicationConfigPath) { $ports=@((Read-JsonFile $ApplicationConfigPath).tcpPorts) }
+    $hostName=$DnsTestHost
+    if (-not $hostName -and $script:PreState.systemIdentity.partOfDomain) { $hostName=$script:PreState.systemIdentity.domainOrWorkgroup }
+    $context=[pscustomobject]@{
+        hostName=$hostName
+        gateways=@($script:CurrentNetwork.activeAdapters | ForEach-Object defaultGateways | Where-Object { $_ } | Sort-Object -Unique)
+        ports=$ports
+    }
+    $probe=Invoke-AssessmentProbe 'Connectivity' $context 25
+    if ($probe.state -ne 'Collected') { Add-Result 'Connectivity' 'NOT_CHECKED' $probe.error; return }
+    foreach ($row in $probe.data) {
+        $state=if ($row.state -eq 'FAIL') {'WARNING'} else {$row.state}
+        Add-Result $row.name $state $row.summary
+    }
+}
 function Write-Reports {
     $summary = Get-Summary
     if ($WhatIfPreference) { Write-Log "Preview result: $($summary.overallStatus). No files were written."; return $summary }
+    $migrationChecks=@($script:Results | Where-Object { $_.name -notin @('Operational before/after assessment','Running services','Listening ports','Post-migration event logs','Connectivity','DNS connectivity','Gateway ICMP','Application connectivity','VSS writers') })
+    $migrationStatus=if (@($migrationChecks | Where-Object state -eq 'FAIL').Count) {'FAIL'} elseif (@($migrationChecks | Where-Object state -in @('WARNING','NOT_CHECKED')).Count) {'WARNING'} else {'PASS'}
+    $summary['migrationChecksStatus']=$migrationStatus
+    $summary['operationalAssessmentPath']=Join-Path $RootPath 'Assessment\AssessmentSummary.json'
     $report = [ordered]@{ schemaVersion = $SchemaVersion; generatedAtUtc = [DateTime]::UtcNow.ToString('o'); mode = $Mode; stateDirectory = $StateDirectory; summary = $summary; results = @($script:Results); actions = @($script:Actions); preMigrationStatePath = $StateJsonPath; postMigrationStatePath = $PostStatePath; rollbackPath = if ($script:RollbackCreated) { $RollbackPath } else { $null } }
     $report | ConvertTo-Json -Depth 15 | Set-Content -Path $ReportJsonPath -Encoding UTF8
-    $html = @('<!doctype html><html><head><meta charset="utf-8"><title>Post-Migration Validation</title><style>body{font-family:Segoe UI,Arial,sans-serif;margin:2rem;color:#202124}h1{color:#174a7e}.PASS{color:#187a3d}.WARNING{color:#9a6700}.FAIL{color:#b42318}.EXPECTED_CHANGE{color:#176b87}table{border-collapse:collapse;width:100%;margin-bottom:1.5rem}th,td{border:1px solid #d0d7de;padding:.45rem;text-align:left;vertical-align:top}th{background:#eef2f6}.summary{padding:1rem;background:#f5f7fa;border-left:5px solid #174a7e}</style></head><body>'); $html += "<h1>Post-Migration Validation</h1><div class='summary'><strong>Overall result: <span class='$($summary.overallStatus)'>$($summary.overallStatus)</span></strong><br>Generated UTC: $($report.generatedAtUtc)<br>Mode: $Mode</div><h2>Summary counts</h2><table><tr><th>State</th><th>Count</th></tr>"; foreach ($key in $summary.counts.Keys) { $html += "<tr><td>$key</td><td>$($summary.counts[$key])</td></tr>" }; $html += '</table><h2>Results</h2><table><tr><th>State</th><th>Check</th><th>Summary</th><th>Details</th></tr>'; foreach ($item in $script:Results) { $html += "<tr><td class='$($item.state)'>$($item.state)</td><td>$($item.name)</td><td>$($item.summary)</td><td>$([System.Net.WebUtility]::HtmlEncode(($item.details -join '<br>')))</td></tr>" }; $html += '</table><h2>Actions and manual follow-up</h2><pre>'; $html += [System.Net.WebUtility]::HtmlEncode((@($script:Actions | ConvertTo-Json -Depth 10) -join "`r`n")); $html += '</pre></body></html>'; $html | Set-Content -Path $ReportHtmlPath -Encoding UTF8
+    $html = @('<!doctype html><html><head><meta charset="utf-8"><title>Post-Migration Validation</title><style>body{font-family:Segoe UI,Arial,sans-serif;margin:2rem;color:#202124}h1{color:#174a7e}.PASS{color:#187a3d}.WARNING{color:#9a6700}.FAIL{color:#b42318}.EXPECTED_CHANGE{color:#176b87}table{border-collapse:collapse;width:100%;margin-bottom:1.5rem}th,td{border:1px solid #d0d7de;padding:.45rem;text-align:left;vertical-align:top}th{background:#eef2f6}.summary{padding:1rem;background:#f5f7fa;border-left:5px solid #174a7e}</style></head><body>'); $html += "<h1>Post-Migration Validation</h1><div class='summary'><strong>Overall result: <span class='$($summary.overallStatus)'>$($summary.overallStatus)</span></strong><br>Generated UTC: $($report.generatedAtUtc)<br>Mode: $Mode<br>Migration checks: $migrationStatus<br>Operational evidence: Assessment/Report.html</div><h2>Summary counts</h2><table><tr><th>State</th><th>Count</th></tr>"; foreach ($key in $summary.counts.Keys) { $html += "<tr><td>$key</td><td>$($summary.counts[$key])</td></tr>" }; $html += '</table><h2>Results</h2><table><tr><th>State</th><th>Check</th><th>Summary</th><th>Details</th></tr>'; foreach ($item in $script:Results) { $html += "<tr><td class='$($item.state)'>$($item.state)</td><td>$($item.name)</td><td>$($item.summary)</td><td>$([System.Net.WebUtility]::HtmlEncode(($item.details -join '<br>')))</td></tr>" }; $html += '</table><h2>Actions and manual follow-up</h2><pre>'; $html += [System.Net.WebUtility]::HtmlEncode((@($script:Actions | ConvertTo-Json -Depth 10) -join "`r`n")); $html += '</pre></body></html>'; $html | Set-Content -Path $ReportHtmlPath -Encoding UTF8
     
     # Text report with deferred route restoration commands
-    $lines = @('Post-migration validation report', "Overall result: $($summary.overallStatus)", "Generated UTC: $($report.generatedAtUtc)", '', 'Summary counts:')
+    $lines = @('Post-migration validation report', "Overall result: $($summary.overallStatus)", "Generated UTC: $($report.generatedAtUtc)", "Migration checks: $migrationStatus", 'Operational evidence: Assessment/Report.html', '', 'Summary counts:')
     foreach ($key in $summary.counts.Keys) { $lines += ('  {0}: {1}' -f $key, $summary.counts[$key]) }
     $lines += ''
     foreach ($item in $script:Results) { $lines += "[$($item.state)] $($item.name): $($item.summary)"; foreach ($detail in $item.details) { $lines += "    $detail" } }
@@ -1456,6 +1491,12 @@ try {
         $StateJsonPath = Join-Path $StateDirectory 'PreMigrationState.json'
         $NetworkJsonPath = Join-Path $StateDirectory 'NetworkConfiguration.json'
         if (-not (Test-InputData)) { $null = Write-Reports; exit 20 }
+        $selectionPath=Join-Path $StateDirectory 'MigrationAssessment\Selection.json'
+        if (Test-Path -LiteralPath $selectionPath) {
+            $capturedLevel=Get-MigrationCapturedAssessmentLevel $StateDirectory
+            if ($PSBoundParameters.ContainsKey('CheckLevel') -and $CheckLevel -ne $capturedLevel) { throw 'Check level must match the selected before capture.' }
+            $CheckLevel=$capturedLevel
+        }
         if (-not (Test-CaptureCompleteness)) { $null = Write-Reports; exit 20 }
         if (-not (Test-ComputerIdentity)) { $null = Write-Reports; exit 20 }
         Report-ManualNetworkHandling
@@ -1483,12 +1524,14 @@ try {
         Invoke-SafePart 'Disk state comparison' { Compare-DiskState }
         Invoke-SafePart 'Service comparison' { Compare-Services }
         Invoke-SafePart 'Collection comparison' { Compare-Collections }
-        Invoke-SafePart 'Filesystem and event checks' { Test-FilesystemAndEvents }
-        Invoke-SafePart 'Connectivity' { Test-Connectivity }
+        Invoke-SafePart 'Filesystem and event checks' { Test-FilesystemAndEvents -SkipEventLogs:($CheckLevel -eq 'Migration') }
+        if ($CheckLevel -eq 'Deep') { Invoke-SafePart 'Connectivity' { Test-BoundedMigrationConnectivity } }
+        else { Add-Action 'Extended connectivity' 'SKIPPED_BY_PROFILE' 'DNS/DC discovery and application connectivity tests are reserved for Deep. See local operational evidence for DC services/shares/replication.' }
         Invoke-SafePart 'Guest agent and Tools' { Test-QemuAgentAndVMwareTools }
-        Invoke-SafePart 'VSS writers' { Test-PostMigrationVss }
+        if ($CheckLevel -eq 'Deep') { Invoke-SafePart 'VSS writers' { Test-PostMigrationVss } }
         Invoke-SafePart 'Obsolete persistent routes' { Remove-ObsoleteMigrationRoutes }
         if ($RemoveHiddenVMwareAdapters -and $Mode -in @('Full', 'ApplyNetwork')) { Remove-HiddenVMwareAdapters }
+        Invoke-SafePart 'Operational before/after assessment' { Invoke-PostMigrationAssessment }
     }
     $summary = Write-Reports
     Write-Log "Overall result: $($summary.overallStatus)" (Get-StateColor $summary.overallStatus)
