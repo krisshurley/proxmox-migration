@@ -218,6 +218,14 @@ try {
         $role='DomainController'
         & (Get-MenuPhaseFixture ReadinessCheck)
         Assert ($script:calls.Count -eq 1 -and $script:calls[0].name -eq 'Test-MigrationReadiness.ps1' -and $script:calls[0].arguments.CheckLevel -eq 'Migration' -and $script:beforeCount -eq 1) 'Default phase still invokes deep/domain checks'
+        Assert ($script:calls[0].arguments.StorageDriverMode -eq 'BeforePrepare') 'An unprepared source is still blocked before step 2 can install drivers'
+    }
+    Case 'Firstboot-managed readiness keeps the restore-injection warning' {
+        $script:calls=@()
+        function Invoke-CheckedMigrationScript { param($Name,$Arguments) $script:calls+=@([pscustomobject]@{name=$Name;arguments=$Arguments}) }
+        function New-SourceMigrationAssessment { }
+        & (Get-MenuPhaseFixture ReadinessCheck) -DriverPreparation FirstbootManaged
+        Assert ($script:calls[0].arguments.StorageDriverMode -eq 'RestoreInjected') 'Firstboot-managed driver semantics changed'
     }
     Case 'Post phase uses stored Deep level and forwards WhatIf without collecting evidence' {
         $script:called=$null; $script:LevelExplicit=$false

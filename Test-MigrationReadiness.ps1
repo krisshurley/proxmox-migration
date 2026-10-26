@@ -11,6 +11,11 @@
 .PARAMETER EventLookbackHours
     Number of hours of Critical/Error event history to inspect. Default is 24.
 
+.PARAMETER StorageDriverMode
+    Installed (default) requires the selected storage driver. BeforePrepare warns
+    if it is missing and directs the operator to step 2. RestoreInjected requires
+    the selected restore method to supply boot-critical drivers.
+
 .PARAMETER CriticalSystemFreeSpaceGB
     System-volume free-space threshold that produces FAIL. Default is 2 GB.
 
@@ -43,7 +48,7 @@ param(
     [ValidateSet('Migration','Deep')][string]$CheckLevel='Migration',
     [ValidateRange(1, 720)]
     [int]$EventLookbackHours = 24,
-    [ValidateSet('Installed', 'RestoreInjected')]
+    [ValidateSet('Installed', 'BeforePrepare', 'RestoreInjected')]
     [string]$StorageDriverMode = 'Installed',
     [ValidateSet('vioscsi', 'viostor')]
     [string]$RequiredStorageDriver = 'vioscsi',
@@ -85,7 +90,7 @@ $LogPath = Join-Path $LogDirectory 'MigrationReadiness.log'
 $JsonPath = Join-Path $RootPath 'MigrationReadiness.json'
 $TextPath = Join-Path $RootPath 'MigrationReadiness.txt'
 $SchemaVersion = '1.0'
-$ScriptVersion = '1.2.1'
+$ScriptVersion = '1.2.2'
 $script:Results = New-Object System.Collections.ArrayList
 $script:LogWriter = $null
 $script:StartedAt = [DateTime]::UtcNow
@@ -252,6 +257,7 @@ function Test-VirtIODrivers {
         }
         $missingStorageCount = @($storageMissing).Length
         if ($missingStorageCount -gt 0 -and $StorageDriverMode -eq 'RestoreInjected') { Add-CheckResult 'VirtIO driver readiness' 'WARNING' 'Required storage drivers are not all installed on the source. The selected restore method must inject boot-critical drivers; this check cannot verify that guarantee.' $details | Out-Null }
+        elseif ($missingStorageCount -gt 0 -and $StorageDriverMode -eq 'BeforePrepare') { Add-CheckResult 'VirtIO driver readiness' 'WARNING' "Not prepared yet: missing storage driver(s): $($storageMissing -join ', '). Run step 2 (Prepare) and require successful driver verification before the migration backup. This warning does not approve migration." $details | Out-Null }
         elseif ($missingStorageCount -gt 0) { Add-CheckResult 'VirtIO driver readiness' 'FAIL' "Missing required storage driver(s): $($storageMissing -join ', ')." $details | Out-Null }
         elseif ($missingNet) { Add-CheckResult 'VirtIO driver readiness' 'WARNING' 'VirtIO storage drivers are present, but NetKVM was not detected.' $details | Out-Null }
         else { Add-CheckResult 'VirtIO driver readiness' 'PASS' 'VirtIO storage and NetKVM drivers were detected.' $details | Out-Null }

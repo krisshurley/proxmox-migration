@@ -145,6 +145,10 @@ diskar och filsystem. Dessutom sparas lokalt driftunderlag och händelseloggar. 
 fullständig DCDiag och omfattande DNS-tester ingår i den fördjupade nivån. Serverrollen
 identifieras automatiskt.
 
+Om lagringsdrivrutinen ännu saknas ger steg 1 en varning om att köra steg 2. Det är
+normalt på en oförberedd VMware-VM och godkänner inte själva flytten. Steg 2 måste
+installera och verifiera drivrutinen innan du tar migrationsbackupen.
+
 Resultat: PASS
 Så hanterar du det: Kontrollen är godkänd.
 
@@ -176,12 +180,18 @@ exportens State\MigrationAssessment. Ta med hela State-mappen i backupen. Bekrä
 åtgärden när du får frågan. Prepare gör ändringar på källan:
 
 1. Installerar det medföljande VirtIO-paketet och förbereder lagringsdrivrutinen.
+   Verifieringen måste lyckas; drivrutinsfel stoppar Prepare före exporten.
 2. Exporterar bland annat aktiva nätverkskort, IPv4-adresser, DNS, gateways, routes,
    tjänster, diskar och serverroller.
 3. Sparar ursprungliga tjänstelägen och stoppar/inaktiverar de VMware Tools-tjänster som
    finns. Tools avinstalleras inte på original-VM:en.
 
 Exporten ingår redan i steg 2. Du behöver inte köra något separat exportsteg.
+
+Normal ordning är 1 → 2 → backup/återläsning → 3. Du behöver inte köra steg 1 igen efter
+en lyckad Prepare. Det fristående Test-MigrationReadiness.ps1 kräver fortfarande
+installerad lagringsdrivrutin som standard; menyn använder läget BeforePrepare för den
+första kontrollen.
 
 Vänta tills Prepare har avslutats. Gå inte vidare om fasen stoppades med ett fel. En
 avbruten Prepare kan ha hunnit installera drivrutiner eller ändra inställningar; den
@@ -228,6 +238,11 @@ Du kan normalt behålla Proxmox nya MAC-adress om:
 Skriptet mappar då automatiskt det enda källkortet till det enda målkortet. Loggen visar
 Unique single VirtIO adapter. IP, nätmask, DNS, gateway och statiska IPv4-routes kan
 återställas även om MAC-adressen har ändrats.
+
+Målkortet får sakna IPv4-adress före eller under återställningen, till exempel när DHCP
+stängs av eller en tillfällig adress tas bort. Skriptet lägger då till den exporterade
+statiska adressen. Verkliga fel vid läsning av nätverksläget stoppar fortfarande
+återställningen. Samma hantering gäller vid rollback.
 
 För en server med DHCP återställs DHCP-läget; själva adressen bestäms av DHCP-servern.
 Om servern använder en reservation kopplad till den gamla MAC-adressen behöver

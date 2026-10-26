@@ -148,7 +148,7 @@ try {
     Write-Host "Phase: $Phase. Detected server type: $role."
     switch ($Phase) {
         'ReadinessCheck' {
-            $readinessArgs = @{CheckLevel=$CheckLevel}
+            $readinessArgs = @{CheckLevel=$CheckLevel;StorageDriverMode='BeforePrepare'}
             if ($DriverPreparation -eq 'FirstbootManaged') { $readinessArgs.StorageDriverMode = 'RestoreInjected' }
             Invoke-CheckedMigrationScript 'Test-MigrationReadiness.ps1' $readinessArgs
             if (-not $WhatIfPreference) { $null=New-SourceMigrationAssessment }

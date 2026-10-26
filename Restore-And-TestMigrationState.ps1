@@ -109,7 +109,7 @@ $ReportHtmlPath = Join-Path $ReportDirectory 'PostMigrationReport.html'
 $ReportTextPath = Join-Path $ReportDirectory 'PostMigrationReport.txt'
 $SchemaVersion = '1.0'
 # Fixed internal build stamp to verify which copy is deployed on a target machine.
-$CodeRevision = '2026-10-26.2'
+$CodeRevision = '2026-10-26.3'
 $script:LogWriter = $null
 $script:Results = New-Object System.Collections.ArrayList
 $script:Actions = New-Object System.Collections.ArrayList
@@ -232,12 +232,21 @@ function Get-AdapterVendorFamily {
     if ($InterfaceDescription -match 'Hyper-V|Microsoft Hyper-V') { return 'Hyper-V' }
     return 'Other'
 }
+function Get-AdapterIPv4Addresses {
+    param([int]$InterfaceIndex)
+    # Enumerate first, then filter locally. A filtered CIM query raises an error
+    # when this NIC has no addresses (e.g. after disabling DHCP/removing its last IP).
+    # An empty result is valid; provider/access/transport failures still terminate.
+    Get-NetIPAddress -ErrorAction Stop | Where-Object {
+        $_.InterfaceIndex -eq $InterfaceIndex -and $_.AddressFamily -eq 'IPv4'
+    }
+}
 function Get-AdapterRecord {
     param($Adapter)
     # Snapshot errors must block a network mutation: an empty snapshot is not a
     # safe rollback baseline. A disabled NIC still normally has bound IPv4 state.
     $config = Get-NetIPConfiguration -InterfaceIndex $Adapter.ifIndex -ErrorAction Stop
-    $ip = @(Get-NetIPAddress -InterfaceIndex $Adapter.ifIndex -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.AddressState -eq 'Preferred' -or $_.PrefixOrigin -eq 'Manual' })
+    $ip = @(Get-AdapterIPv4Addresses -InterfaceIndex $Adapter.ifIndex | Where-Object { $_.AddressState -eq 'Preferred' -or $_.PrefixOrigin -eq 'Manual' })
     $dnsClient = Get-DnsClient -InterfaceIndex $Adapter.ifIndex -ErrorAction Stop | Select-Object -First 1
     $dns = @(Get-DnsClientServerAddress -InterfaceIndex $Adapter.ifIndex -AddressFamily IPv4 -ErrorAction Stop | Select-Object -ExpandProperty ServerAddresses)
     $ipInterface = Get-NetIPInterface -InterfaceIndex $Adapter.ifIndex -AddressFamily IPv4 -ErrorAction Stop | Select-Object -First 1
@@ -481,18 +490,18 @@ function Restore-AdapterNetwork {
     Enable-NetAdapter -Name $target.interfaceAlias -Confirm:$false -ErrorAction Stop | Out-Null
     if ($source.dhcpEnabled) {
         # Remove stale manually assigned IPs before requesting DHCP; preserve DHCP/WellKnown addresses.
-        foreach ($address in @(Get-NetIPAddress -InterfaceIndex $target.interfaceIndex -AddressFamily IPv4 -ErrorAction Stop)) {
+        foreach ($address in @(Get-AdapterIPv4Addresses -InterfaceIndex $target.interfaceIndex)) {
             if ($address.PrefixOrigin -eq 'Manual') { Remove-NetIPAddress -InputObject $address -Confirm:$false -ErrorAction Stop }
         }
         Set-NetIPInterface -InterfaceIndex $target.interfaceIndex -AddressFamily IPv4 -Dhcp Enabled -Confirm:$false -ErrorAction Stop
     } else {
         Set-NetIPInterface -InterfaceIndex $target.interfaceIndex -AddressFamily IPv4 -Dhcp Disabled -Confirm:$false -ErrorAction Stop
         $desired = @($source.ipv4Addresses | ForEach-Object address)
-        foreach ($address in @(Get-NetIPAddress -InterfaceIndex $target.interfaceIndex -AddressFamily IPv4 -ErrorAction Stop)) {
+        foreach ($address in @(Get-AdapterIPv4Addresses -InterfaceIndex $target.interfaceIndex)) {
             if ($address.IPAddress -notin $desired -and $address.PrefixOrigin -ne 'WellKnown') { Remove-NetIPAddress -InputObject $address -Confirm:$false -ErrorAction Stop }
         }
         foreach ($address in @($source.ipv4Addresses)) {
-            $existing = @(Get-NetIPAddress -InterfaceIndex $target.interfaceIndex -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.IPAddress -eq $address.address })
+            $existing = @(Get-AdapterIPv4Addresses -InterfaceIndex $target.interfaceIndex | Where-Object { $_.IPAddress -eq $address.address })
             if ($existing.Count -eq 0) {
                 New-NetIPAddress -InterfaceIndex $target.interfaceIndex -IPAddress $address.address -PrefixLength $address.prefixLength -AddressFamily IPv4 -Confirm:$false -ErrorAction Stop | Out-Null
             } elseif ([int]$existing[0].PrefixLength -ne [int]$address.prefixLength) {
@@ -515,7 +524,7 @@ function Restore-AdapterNetwork {
     $ready = $false
     for ($attempt = 0; $attempt -lt 15; $attempt++) {
         $nic = Get-NetAdapter -InterfaceIndex $target.interfaceIndex -ErrorAction Stop
-        $addresses = @(Get-NetIPAddress -InterfaceIndex $target.interfaceIndex -AddressFamily IPv4 -ErrorAction Stop)
+        $addresses = @(Get-AdapterIPv4Addresses -InterfaceIndex $target.interfaceIndex)
         if (@($addresses | Where-Object AddressState -eq 'Duplicate').Count) { throw 'Windows detected a duplicate IPv4 address.' }
         $preferred = @($addresses | Where-Object { $_.AddressState -eq 'Preferred' -and $_.IPAddress -notlike '169.254.*' } | ForEach-Object IPAddress)
         $missing = @(if (-not $source.dhcpEnabled) { $source.ipv4Addresses | Where-Object { $_.address -notin $preferred } })
@@ -757,7 +766,7 @@ function Restore-RollbackAdapter {
     if (-not $PSCmdlet.ShouldProcess($target.interfaceAlias, 'Restore pre-change target network configuration')) { return $false }
     Enable-NetAdapter -Name $target.interfaceAlias -Confirm:$false -ErrorAction Stop | Out-Null
     foreach ($route in @(Get-TargetStaticRoutes -InterfaceIndex $target.interfaceIndex)) { Remove-MigrationRoute -Route $route -InterfaceIndex $target.interfaceIndex }
-    foreach ($address in @(Get-NetIPAddress -InterfaceIndex $target.interfaceIndex -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.PrefixOrigin -eq 'Manual' })) {
+    foreach ($address in @(Get-AdapterIPv4Addresses -InterfaceIndex $target.interfaceIndex | Where-Object { $_.PrefixOrigin -eq 'Manual' })) {
         Remove-NetIPAddress -InputObject $address -Confirm:$false -ErrorAction Stop
     }
     $dhcp = if ($source.dhcpEnabled) { 'Enabled' } else { 'Disabled' }

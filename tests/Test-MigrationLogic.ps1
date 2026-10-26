@@ -540,7 +540,7 @@ try {
         $script:Prefix=16; $script:Enabled=$false
         function Enable-NetAdapter { param($Name,$Confirm) $script:Enabled=$true }
         function Set-NetIPInterface { param($InterfaceIndex,$AddressFamily,$Dhcp,$InterfaceMetric,$Confirm) Assert-True ($AddressFamily -eq 'IPv4') 'IPv6 would have been changed.' }
-        function Get-NetIPAddress { param($InterfaceIndex,$AddressFamily) [pscustomobject]@{IPAddress='192.0.2.10';PrefixLength=$script:Prefix;PrefixOrigin='Manual';AddressState='Preferred'} }
+        function Get-NetIPAddress { param($InterfaceIndex,$AddressFamily) [pscustomobject]@{InterfaceIndex=20;AddressFamily='IPv4';IPAddress='192.0.2.10';PrefixLength=$script:Prefix;PrefixOrigin='Manual';AddressState='Preferred'} }
         function Set-NetIPAddress { param($InputObject,$PrefixLength,$Confirm) $script:Prefix=$PrefixLength }
         function New-NetIPAddress { throw 'Existing IP was unnecessarily recreated' }
         function Get-TargetStaticRoutes { param($InterfaceIndex) @() }
@@ -548,6 +548,62 @@ try {
         function Get-NetAdapter { param($InterfaceIndex) [pscustomobject]@{Status='Up'} }
         Restore-AdapterNetwork $mapping -Confirm:$false
         Assert-True ($script:Prefix -eq 24 -and $script:Enabled -and $script:NetworkChanged) 'Prefix or adapter enable was not applied.'
+    }
+    Test-Case 'IPv4 enumeration permits an empty target and excludes other NICs and IPv6' {
+        function Get-NetIPAddress {
+            param($InterfaceIndex,$AddressFamily)
+            Assert-True (-not $PSBoundParameters.ContainsKey('InterfaceIndex') -and -not $PSBoundParameters.ContainsKey('AddressFamily')) 'Filtered CIM query would reject an empty target.'
+            [pscustomobject]@{InterfaceIndex=1;AddressFamily='IPv4';IPAddress='127.0.0.1'}
+            [pscustomobject]@{InterfaceIndex=20;AddressFamily='IPv6';IPAddress='fe80::1'}
+        }
+        Assert-True (@(Get-AdapterIPv4Addresses 20).Count -eq 0) 'Another interface or IPv6 address was selected.'
+    }
+    Test-Case 'IPv4 enumeration propagates provider failures' {
+        function Get-NetIPAddress { throw 'CIM access denied' }
+        Assert-Throws { Get-AdapterIPv4Addresses 20 } 'CIM access denied'
+    }
+    foreach ($initialState in @('Empty','Dhcp','TemporaryStatic')) {
+        Test-Case "Static restore handles $initialState without a filtered CIM no-match failure" {
+            $script:FixtureAddress=if ($initialState -eq 'Empty') { $null } elseif ($initialState -eq 'Dhcp') { '192.0.2.200' } else { '12.13.14.15' }
+            $source=[pscustomobject]@{dhcpEnabled=$false;ipv4Addresses=@([pscustomobject]@{address='192.0.2.10';prefixLength=24});defaultGateways=@();interfaceIndex=4;interfaceMetric=15}
+            $mapping=[pscustomobject]@{source=$source;target=[pscustomobject]@{adapter=[pscustomobject]@{interfaceIndex=20;interfaceAlias='Target'}}}
+            $script:PreNetwork=[pscustomobject]@{ipv4Routes=@()}
+            function Enable-NetAdapter { param($Name,$Confirm) }
+            function Set-NetIPInterface {
+                param($InterfaceIndex,$AddressFamily,$Dhcp,$InterfaceMetric,$Confirm)
+                if ($Dhcp -eq 'Disabled' -and $initialState -eq 'Dhcp') { $script:FixtureAddress=$null }
+            }
+            function Get-NetIPAddress {
+                param($InterfaceIndex,$AddressFamily)
+                if ($PSBoundParameters.ContainsKey('InterfaceIndex') -and -not $script:FixtureAddress) { throw 'No matching MSFT_NetIPAddress objects found' }
+                [pscustomobject]@{InterfaceIndex=1;AddressFamily='IPv4';IPAddress='127.0.0.1';PrefixOrigin='WellKnown';AddressState='Preferred'}
+                if ($script:FixtureAddress) { [pscustomobject]@{InterfaceIndex=20;AddressFamily='IPv4';IPAddress=$script:FixtureAddress;PrefixLength=24;PrefixOrigin='Manual';AddressState='Preferred'} }
+            }
+            function Remove-NetIPAddress { param($InputObject,$Confirm) Assert-True ($InputObject.InterfaceIndex -eq 20) 'Removed another NIC address.'; $script:FixtureAddress=$null }
+            function New-NetIPAddress { param($InterfaceIndex,$IPAddress,$PrefixLength,$AddressFamily,$Confirm) Assert-True ($InterfaceIndex -eq 20 -and $PrefixLength -eq 24) 'Wrong target or prefix.'; $script:FixtureAddress=$IPAddress }
+            function Get-TargetStaticRoutes { param($InterfaceIndex) @() }
+            function Set-CapturedDnsClient { param($Source,$InterfaceIndex) }
+            function Get-NetAdapter { param($InterfaceIndex) [pscustomobject]@{Status='Up'} }
+            Restore-AdapterNetwork $mapping -Confirm:$false
+            Assert-True ($script:FixtureAddress -eq '192.0.2.10' -and $script:NetworkChanged) 'Expected static IPv4 was not restored.'
+        }
+    }
+    Test-Case 'Rollback recreates static IPv4 after the target loses its last address' {
+        $script:RollbackPath='mock.json';$script:RollbackAddress=''
+        function Read-JsonFile { param($Path) [pscustomobject]@{adapter=[pscustomobject]@{dhcpEnabled=$false;interfaceMetric=15;status='Up';ipv4Addresses=@([pscustomobject]@{address='192.0.2.200';prefixLength=24})};routes=@()} }
+        function Enable-NetAdapter { param($Name,$Confirm) }
+        function Get-TargetStaticRoutes { param($InterfaceIndex) @() }
+        function Get-NetIPAddress {
+            param($InterfaceIndex,$AddressFamily)
+            if ($PSBoundParameters.ContainsKey('InterfaceIndex')) { throw 'No matching MSFT_NetIPAddress objects found' }
+            [pscustomobject]@{InterfaceIndex=1;AddressFamily='IPv4';IPAddress='127.0.0.1';PrefixOrigin='WellKnown'}
+        }
+        function Set-NetIPInterface { param($InterfaceIndex,$AddressFamily,$Dhcp,$InterfaceMetric,$Confirm) }
+        function New-NetIPAddress { param($InterfaceIndex,$IPAddress,$PrefixLength,$Confirm) Assert-True ($InterfaceIndex -eq 20) 'Wrong rollback NIC.'; $script:RollbackAddress=$IPAddress }
+        function Set-CapturedDnsClient { param($Source,$InterfaceIndex) }
+        $mapping=[pscustomobject]@{target=[pscustomobject]@{adapter=[pscustomobject]@{interfaceIndex=20;interfaceAlias='Target'}}}
+        Assert-True (Restore-RollbackAdapter $mapping -Confirm:$false) 'Rollback failed.'
+        Assert-True ($script:RollbackAddress -eq '192.0.2.200') 'Rollback did not recreate the saved address.'
     }
     Test-Case 'DNS automatic assignment resets servers and empty suffix is restored' {
         $source=[pscustomobject]@{dnsServers=@('192.0.2.53');dnsAutomatic=$true;dnsSuffix='';registerThisConnectionAddress=$false;useSuffixWhenRegistering=$false}
@@ -934,6 +990,44 @@ try {
         function Get-AuthenticodeSignature { param($FilePath) [pscustomobject]@{Status='HashMismatch'} }
         Assert-Throws { Test-MigrationInstallerTrust -Path 'fixture.exe' } 'HashMismatch'
         Assert-Throws { Test-MigrationInstallerTrust -Path 'fixture.exe' -ExpectedSha256 'WRONG' } 'SHA-256 mismatch'
+    }
+    foreach ($driverMode in @('BeforePrepare','Installed','RestoreInjected')) {
+        Test-Case "Missing storage driver is classified correctly in $driverMode mode" {
+            Import-FunctionDefinitions 'Test-MigrationReadiness.ps1' @('Test-VirtIODrivers')
+            $StorageDriverMode=$driverMode; $RequiredStorageDriver='vioscsi'
+            function Invoke-ReadOnlyCheck { param($Name,$Body) & $Body }
+            function Get-CimInstance { param($ClassName) @() }
+            function Get-Command { param($Name) $null }
+            function Join-Path { param($Path,$ChildPath) $ChildPath }
+            function Test-Path { param($Path,$PathType) $false }
+            function Get-Service { param($Name) $null }
+            $script:DriverCheck=$null
+            function Add-CheckResult { param($Name,$State,$Summary,$Details) $script:DriverCheck=[pscustomobject]@{state=$State;summary=$Summary} }
+            Test-VirtIODrivers
+            $expected=if ($driverMode -eq 'Installed') { 'FAIL' } else { 'WARNING' }
+            Assert-True ($script:DriverCheck.state -eq $expected) 'Missing driver lost its mode-specific safety classification.'
+            if ($driverMode -eq 'BeforePrepare') { Assert-True ($script:DriverCheck.summary -match 'step 2' -and $script:DriverCheck.summary -match 'does not approve migration') 'Preparation requirement is unclear.' }
+            if ($driverMode -eq 'RestoreInjected') { Assert-True ($script:DriverCheck.summary -match 'inject boot-critical') 'Restore injection requirement was lost.' }
+        }
+    }
+    Test-Case 'BeforePrepare still propagates a failed storage driver query' {
+        $StorageDriverMode='BeforePrepare'; $RequiredStorageDriver='vioscsi'
+        function Invoke-ReadOnlyCheck { param($Name,$Body) & $Body }
+        function Get-CimInstance { param($ClassName) throw 'Driver inventory unavailable' }
+        Assert-Throws { Test-VirtIODrivers } 'Driver inventory unavailable'
+    }
+    Test-Case 'Prepare driver verification failure blocks export and service shutdown' {
+        function New-SourceMigrationAssessment { [pscustomobject]@{checkLevel='Migration'} }
+        $script:PrepareCalls=@()
+        function Invoke-CheckedMigrationScript {
+            param($Name,$Arguments,$WarningCodes)
+            $script:PrepareCalls += $Name
+            if ($Name -eq 'mig_prep.ps1') { throw 'Independent verification failed: vioscsi boot start mode' }
+        }
+        function Save-SourceMigrationAssessment { throw 'Failed preparation must not finalize a capture' }
+        function Write-MigrationCaptureSummary { throw 'Failed preparation must not approve a capture' }
+        Assert-Throws { & (Get-PreparePhaseFixture) -Confirm:$false } 'Independent verification failed'
+        Assert-True ($script:PrepareCalls.Count -eq 1 -and $script:PrepareCalls[0] -eq 'mig_prep.ps1') 'Driver failure allowed export/service shutdown.'
     }
     Test-Case 'Normal Prepare captures and disables Tools by default without installer override flags' {
         function New-SourceMigrationAssessment { [pscustomobject]@{checkLevel='Migration'} }
