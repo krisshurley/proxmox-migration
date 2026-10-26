@@ -97,6 +97,17 @@ be terminated. The Deep DC child is limited to 300 s. Durations and missing data
 are recorded; timeouts never imply a healthy result. These limits do not wrap
 network mutations, Tools uninstall, driver installation or an explicit DeepScan.
 
+Diagnostics use an owned `System.Diagnostics.Process` with concurrent asynchronous
+stdout/stderr reads. The exit code is read while the process handle is still owned;
+an unavailable exit code remains unverified. Failed probe reports preserve child-job
+error reasons instead of describing every failure as a timeout.
+
+Per-user service instances remain in snapshots but are excluded from server-service
+regression checks. New captures include numeric ServiceType and isPerUserInstance;
+older captures use a restricted list of known Windows template names plus a LUID
+suffix. Arbitrary hexadecimal suffixes do not exempt normal server services. Service
+comparison never changes a service configuration or state.
+
 Reports are separate: `Reports/PostMigrationReport.*` describes migration checks
 and actions (`summary.migrationChecksStatus`), while `Assessment/Report.*`,
 `Comparison.json` and `AssessmentSummary.json` describe operational drift.

@@ -300,5 +300,122 @@ try {
         $summary=Get-Content (Join-Path $script:lastAssessmentOutput 'AssessmentSummary.json') -Raw | ConvertFrom-Json
         Assert ($code -eq 1 -and $summary.operationalStatus -eq 'NotVerified') 'Deep timeout was treated as healthy or merely an existing failure'
     }
+    Case 'Real native processes retain exit zero for repeated short diagnostics' {
+        $engine=(Get-Process -Id $PID).Path
+        $command="[Console]::Out.WriteLine('Volume - C: is NOT Dirty'); exit 0"
+        $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+        foreach ($attempt in 1..5) {
+            $output=Invoke-AssessmentNative $engine @('-NoProfile','-EncodedCommand',$encoded) 10
+            Assert ($output -match 'is NOT Dirty') 'Short successful diagnostic was lost or misclassified'
+        }
+    }
+    Case 'Real native failure preserves nonzero exit code stdout and stderr' {
+        $engine=(Get-Process -Id $PID).Path
+        $command="[Console]::Out.WriteLine('diagnostic output'); [Console]::Error.WriteLine('access denied'); exit 7"
+        $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+        $caught=$false
+        try { Invoke-AssessmentNative $engine @('-NoProfile','-EncodedCommand',$encoded) 10 }
+        catch {
+            $caught=$true
+            Assert ($_.Exception.Data['DiagnosticExitCode'] -eq 7 -and $_.Exception.Message -match 'access denied' -and $_.Exception.Message -match 'diagnostic output') 'Native failure details were hidden'
+        }
+        Assert $caught 'Nonzero exit was accepted'
+    }
+    Case 'Concurrent native output reads avoid stdout stderr pipe deadlock' {
+        $engine=(Get-Process -Id $PID).Path
+        $command="[Console]::Out.Write(('x' * 200000)); [Console]::Error.Write(('e' * 200000)); exit 0"
+        $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+        $output=Invoke-AssessmentNative $engine @('-NoProfile','-EncodedCommand',$encoded) 10
+        Assert ($output.Length -eq 200000) 'Verbose native output was lost or blocked'
+    }
+    Case 'Native timeout terminates only the launched diagnostic process' {
+        $engine=(Get-Process -Id $PID).Path
+        $command="[IO.File]::WriteAllText('"+(Join-Path $temp 'child-pid.txt').Replace("'","''")+"',[string]`$PID); Start-Sleep -Seconds 20"
+        $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+        $clock=[Diagnostics.Stopwatch]::StartNew(); $caught=$false
+        try { Invoke-AssessmentNative $engine @('-NoProfile','-EncodedCommand',$encoded) 2 }
+        catch { $caught=$true; Assert ($_.Exception.Message -match 'timed out') 'Timeout reason missing' }
+        Assert ($caught -and $clock.Elapsed.TotalSeconds -lt 8) 'Native timeout did not bound execution'
+        $childId=[int](Get-Content (Join-Path $temp 'child-pid.txt') -Raw)
+        Assert (-not (Get-Process -Id $childId -ErrorAction SilentlyContinue)) 'Timed-out child was left running'
+    }
+    Case 'Real failed probe preserves its actual reason instead of claiming timeout' {
+        $probe=Invoke-AssessmentProbe 'UnknownProbe' ([pscustomobject]@{}) 5
+        Assert ($probe.state -eq 'NotVerified' -and $probe.error -match 'Unknown evidence kind' -and $probe.error -notmatch 'timed out') 'Failed child reason was replaced with generic timeout'
+    }
+    Case 'Known legacy per-user instances with changed suffix do not become missing server services' {
+        $before=Snapshot; $after=Snapshot After
+        $before.probes.Services=Probe @([pscustomobject]@{name='CDPUserSvc_1f6b149';state='Running'},[pscustomobject]@{name='WpnUserService_1f6b149';state='Running'},[pscustomobject]@{name='NTDS';state='Running'})
+        $after.probes.Services=Probe @([pscustomobject]@{name='CDPUserSvc_59d5a';state='Running'},[pscustomobject]@{name='WpnUserService_59d5a';state='Running'},[pscustomobject]@{name='NTDS';state='Running'})
+        Assert ((Compare-MigrationAssessment $before $after)[0].classification -eq 'NoDeviation') 'Session suffix generated false migration failure'
+    }
+    Case 'Verified per-user metadata excludes instances but not ordinary server services with hex suffixes' {
+        $before=Snapshot; $after=Snapshot After
+        $before.probes.Services=Probe @([pscustomobject]@{name='FutureUserSvc_ab12';state='Running';isPerUserInstance=$true},[pscustomobject]@{name='BusinessApp_ab12';state='Running';isPerUserInstance=$false})
+        $after.probes.Services=Probe @([pscustomobject]@{name='FutureUserSvc_cd34';state='Running';isPerUserInstance=$true},[pscustomobject]@{name='OtherService';state='Running'})
+        $rows=@(Compare-MigrationAssessment $before $after)
+        Assert ($rows.Count -eq 1 -and $rows[0].check -eq 'BusinessApp_ab12' -and $rows[0].classification -eq 'NewDeviation') 'Real server service regression was hidden'
+        Assert (-not (Test-AssessmentSessionService ([pscustomobject]@{name='BusinessApp_ab12'}))) 'Legacy arbitrary hex suffix was ignored'
+    }
+    Case 'Explicit non-user metadata overrides legacy name fallback' {
+        Assert (-not (Test-AssessmentSessionService ([pscustomobject]@{name='CDPUserSvc_ab12';isPerUserInstance=$false}))) 'Collector metadata ignored'
+    }
+    Case 'Stopped user instances are not pre-existing server operational deviations' {
+        $before=Snapshot
+        $before.probes.Services=Probe @([pscustomobject]@{name='CDPUserSvc_ab12';state='Stopped';startMode='Auto'},[pscustomobject]@{name='NTDS';state='Stopped';startMode='Auto'})
+        $rows=@(Get-MigrationBeforeObservations $before)
+        Assert ($rows.Count -eq 1 -and $rows[0].check -eq 'NTDS') 'Stopped session instance polluted server baseline'
+    }
+    Case 'Unknown native exit code is never coerced to success' {
+        $stream=[pscustomobject]@{Result='Volume - C: is NOT Dirty'}
+        $stream | Add-Member ScriptMethod Wait { param($Milliseconds) $true }
+        $reader=[pscustomobject]@{Task=$stream}
+        $reader | Add-Member ScriptMethod ReadToEndAsync { $this.Task }
+        $startInfo=[pscustomobject]@{FileName='';Arguments='';UseShellExecute=$true;CreateNoWindow=$false;RedirectStandardOutput=$false;RedirectStandardError=$false}
+        $fake=[pscustomobject]@{StartInfo=$startInfo;StandardOutput=$reader;StandardError=$reader;ExitCode=$null;HasExited=$true;disposed=$false}
+        $fake | Add-Member ScriptMethod Start { $true }
+        $fake | Add-Member ScriptMethod WaitForExit { param($Milliseconds) $true }
+        $fake | Add-Member ScriptMethod Dispose { $this.disposed=$true }
+        function New-Object { param($TypeName) if ($TypeName -ne 'System.Diagnostics.Process') { throw 'Unexpected type' }; $fake }
+        $caught=$false; try { Invoke-AssessmentNative 'fsutil.exe' @('dirty','query','C:') } catch { $caught=$true; Assert ($_.Exception.Message -match 'without an accessible exit code') 'Missing exit reason hidden' }
+        Assert ($caught -and $fake.disposed) 'Unknown exit passed or process handle leaked'
+    }
+    Case 'Service collector records instance flags from Windows ServiceType' {
+        function Get-Service { [pscustomobject]@{Name='FutureUserSvc_ab12';ServiceType=208}; [pscustomobject]@{Name='BusinessApp_ab12';ServiceType=16} }
+        function Get-CimInstance { [pscustomobject]@{Name='FutureUserSvc_ab12';State='Running';StartMode='Auto'}; [pscustomobject]@{Name='BusinessApp_ab12';State='Running';StartMode='Auto'} }
+        $records=@(Get-AssessmentLocalEvidence Services $null)
+        Assert ($records[0].isPerUserInstance -and -not $records[1].isPerUserInstance) 'Service type flags not captured'
+    }
+    Case 'Source export preserves service metadata for the main post-migration comparison' {
+        function Get-AssessmentServiceTypes { @{FutureUserSvc_ab12=208;BusinessApp_ab12=16} }
+        function Get-CimInstance {
+            [pscustomobject]@{Name='FutureUserSvc_ab12';DisplayName='Future user';State='Running';StartMode='Auto';StartName='LocalSystem';PathName='user.exe'}
+            [pscustomobject]@{Name='BusinessApp_ab12';DisplayName='Application';State='Running';StartMode='Auto';StartName='LocalSystem';PathName='application.exe'}
+        }
+        function Get-SafeExecutablePath { param($Path) $Path }
+        $tokens=$null; $errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'Export-MigrationState.ps1'),[ref]$tokens,[ref]$errors)
+        $fn=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-ServiceState'},$true)
+        $state=& ([scriptblock]::Create($fn.Body.Extent.Text.Substring(1,$fn.Body.Extent.Text.Length-2)))
+        Assert ($state.all.Count -eq 2 -and $state.all[0].isPerUserInstance -and -not $state.all[1].isPerUserInstance -and $state.runningBeforeMigration.Count -eq 2) 'Source metadata or original service state was lost'
+    }
+    Case 'Successful native command with no stdout is accepted for event exports' {
+        $engine=(Get-Process -Id $PID).Path
+        $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('exit 0'))
+        $output=Invoke-AssessmentNative $engine @('-NoProfile','-EncodedCommand',$encoded) 10
+        Assert ([string]::IsNullOrEmpty($output)) 'Empty successful export was misclassified'
+    }
+    Case 'Log collection continues after successful export and retains structured error events' {
+        $liveLog=Join-Path $temp 'live.evtx'; 'log metadata fixture' | Set-Content $liveLog
+        function Invoke-AssessmentNative { param($FilePath,$Arguments) 'export fixture' | Set-Content -LiteralPath $Arguments[2]; '' }
+        function Get-WinEvent {
+            param($ListLog,$LogName,$FilterHashtable,$MaxEvents)
+            if ($ListLog) { return [pscustomobject]@{LogFilePath=$liveLog} }
+            [pscustomobject]@{RecordId=9;TimeCreated=[datetime]::UtcNow;ProviderName='TestProvider';Id=1005;Level=2;Message='test event'}
+        }
+        $context=[pscustomobject]@{sinceUtc=[datetime]::UtcNow.AddHours(-24).ToString('o');outputDirectory=$temp}
+        $log=Get-AssessmentLocalEvidence 'Log:System' $context
+        Assert ($log.events.Count -eq 1 -and $log.events[0].id -eq 1005 -and $log.lastRecordId -eq 9 -and (Test-Path (Join-Path $temp 'System.evtx'))) 'Export succeeded but structured event evidence was not collected'
+    }
     Write-Host "Assessment tests passed: $passed"
 } finally { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }

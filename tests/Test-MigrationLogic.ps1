@@ -377,6 +377,7 @@ try {
         if ($parseErrors.Count) { throw "Parser errors in $($file.Name): $($parseErrors.Message -join '; ')" }
     }
     . (Join-Path $script:RepositoryRoot 'Migration.Common.ps1')
+    . (Join-Path $script:RepositoryRoot 'Migration.Assessment.ps1')
     Import-FunctionDefinitions 'load-virtio-scsi-on-boot.ps1' @('Assert-VirtioDriverPreparation')
     Import-FunctionDefinitions 'Restore-And-TestMigrationState.ps1'
     Import-FunctionDefinitions 'Export-MigrationState.ps1' @('Get-StructuredRoutes', 'Get-NetworkCapture', 'Disable-VMwareToolsServices')
@@ -593,6 +594,16 @@ try {
         function Get-CimInstance { param($ClassName) @() }
         Compare-Services
         Assert-True ($script:Results[0].state -eq 'WARNING' -and $script:Results[0].details[0] -eq 'PolicyAgent') 'Critical stopped service was hidden or baseline stopped service was flagged.'
+    }
+    Test-Case 'Server service comparison ignores user instances but retains real hexadecimal names' {
+        $script:PreState=[pscustomobject]@{services=[pscustomobject]@{all=@(
+            [pscustomobject]@{name='CDPUserSvc_1f6b149';startType='Auto';status='Running'},
+            [pscustomobject]@{name='FutureUserSvc_123';startType='Auto';status='Running';isPerUserInstance=$true},
+            [pscustomobject]@{name='BusinessApp_ab12';startType='Auto';status='Running';isPerUserInstance=$false}
+        )}}
+        function Get-CimInstance { @() }
+        Compare-Services
+        Assert-True ($script:Results[0].state -eq 'WARNING' -and $script:Results[0].details.Count -eq 1 -and $script:Results[0].details[0] -eq 'BusinessApp_ab12') 'User instances polluted comparison or real service disappearance was hidden.'
     }
     Test-Case 'Disabled VMware services report failure when the state change fails' {
         function Get-Service { param($Name) if ($Name -eq 'VMTools') { [pscustomobject]@{Name=$Name;Status='Running';StartType='Automatic'} } }

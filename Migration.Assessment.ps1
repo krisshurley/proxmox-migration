@@ -12,34 +12,75 @@ function ConvertTo-AssessmentUtc {
 
 function Invoke-AssessmentNative {
     param([string]$FilePath, [string[]]$Arguments, [int]$TimeoutSeconds = 12)
-    $out = [IO.Path]::GetTempFileName(); $err = [IO.Path]::GetTempFileName(); $process = $null
+    # Own the Process from Start to Dispose. Windows PowerShell Start-Process
+    # -PassThru can release the handle of a short-lived process before ExitCode
+    # is read, leaving a null exit code. Never coerce an unknown exit to zero.
+    $process=New-Object System.Diagnostics.Process
+    $started=$false
+    $timer=[Diagnostics.Stopwatch]::StartNew()
     try {
-        # Windows filenames cannot contain double quotes. Quote every argument,
-        # including log names/paths with spaces. No command shell is involved.
-        $quoted = @($Arguments | ForEach-Object {
+        $quoted=@($Arguments | ForEach-Object {
             if ($_ -match '"' -or $_.EndsWith('\')) { throw 'Unsupported native argument quoting.' }
             '"' + $_ + '"'
         }) -join ' '
-        $process = Start-Process -FilePath $FilePath -ArgumentList $quoted -PassThru -NoNewWindow -RedirectStandardOutput $out -RedirectStandardError $err -ErrorAction Stop
+        $process.StartInfo.FileName=$FilePath
+        $process.StartInfo.Arguments=$quoted
+        $process.StartInfo.UseShellExecute=$false
+        $process.StartInfo.CreateNoWindow=$true
+        $process.StartInfo.RedirectStandardOutput=$true
+        $process.StartInfo.RedirectStandardError=$true
+        $started=$process.Start()
+        if (-not $started) { throw "Could not start diagnostic $FilePath." }
+        # Drain both streams concurrently so verbose diagnostics cannot deadlock
+        # on a full stdout/stderr pipe. ReadToEndAsync is available on .NET 4.5+.
+        $stdout=$process.StandardOutput.ReadToEndAsync()
+        $stderr=$process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-            if ($env:OS -eq 'Windows_NT') {
-                # Only terminate the diagnostic process tree created above.
-                & taskkill.exe /PID $process.Id /T /F 2>&1 | Out-Null
-            } else { $process.Kill() }
-            $null=$process.WaitForExit(2000)
             throw "$FilePath timed out after $TimeoutSeconds seconds; not verified."
         }
-        $process.WaitForExit()
-        if ($process.ExitCode -ne 0) {
-            $exception=New-Object System.InvalidOperationException("$FilePath exit $($process.ExitCode): $(Get-Content $err -Raw) $(Get-Content $out -Raw)")
-            $exception.Data['DiagnosticExitCode']=$process.ExitCode
+        foreach ($stream in @($stdout,$stderr)) {
+            $remaining=[Math]::Max(1,($TimeoutSeconds * 1000)-[int]$timer.ElapsedMilliseconds)
+            if (-not $stream.Wait($remaining)) { throw "$FilePath output collection timed out after $TimeoutSeconds seconds; not verified." }
+        }
+        $exitCode=$process.ExitCode
+        if ($null -eq $exitCode) { throw "$FilePath completed without an accessible exit code; not verified." }
+        if ($exitCode -ne 0) {
+            $exception=New-Object System.InvalidOperationException("$FilePath exit ${exitCode}: $($stderr.Result) $($stdout.Result)")
+            $exception.Data['DiagnosticExitCode']=$exitCode
             throw $exception
         }
-        [string](Get-Content $out -Raw)
+        [string]$stdout.Result
     } finally {
-        if ($null -ne $process) { if (-not $process.HasExited) { $process.Kill() }; $process.Dispose() }
-        Remove-Item -LiteralPath $out,$err -Force -ErrorAction SilentlyContinue
+        try {
+            if ($started -and -not $process.HasExited) {
+                if ($env:OS -eq 'Windows_NT') {
+                    # Only the diagnostic process tree created above is targeted.
+                    & taskkill.exe /PID $process.Id /T /F 2>&1 | Out-Null
+                }
+                if (-not $process.HasExited) { $process.Kill() }
+                $null=$process.WaitForExit(2000)
+            }
+        } finally { $process.Dispose(); $timer.Stop() }
     }
+}
+
+function Get-AssessmentServiceTypes {
+    $types=@{}
+    foreach ($controller in @(Get-Service -ErrorAction Stop)) {
+        try { $types[$controller.Name]=[int]$controller.ServiceType }
+        catch { } # A disappearing service must not invalidate the CIM inventory.
+        finally { if ($controller -is [IDisposable]) { $controller.Dispose() } }
+    }
+    return $types
+}
+
+function Test-AssessmentSessionService {
+    param($Service)
+    if ($Service.PSObject.Properties['isPerUserInstance']) { return [bool]$Service.isPerUserInstance }
+    # Older snapshots did not capture ServiceType. Limit the fallback to known
+    # Windows per-user templates, not every server service ending in hexadecimal.
+    $templates=@('AarSvc','BcastDVRUserService','BluetoothUserService','CaptureService','CloudBackupRestoreSvc','cbdhsvc','CDPUserSvc','ConsentUxUserSvc','CredentialEnrollmentManagerUserSvc','DeviceAssociationBrokerSvc','DevicePickerUserSvc','DevicesFlowUserSvc','MessagingService','NPSMSvc','OneSyncSvc','P9RdrService','PenService','PimIndexMaintenanceSvc','PrintWorkflowUserSvc','UdkUserSvc','UnistoreSvc','UserDataSvc','webthreatdefusersvc','WpnUserService')
+    return ($Service.name -match '^(?<template>.+)_[0-9a-fA-F]+$' -and $Matches['template'] -in $templates)
 }
 
 function Get-AssessmentLocalEvidence {
@@ -53,8 +94,19 @@ function Get-AssessmentLocalEvidence {
         }
         'Services' {
             $names=@('NTDS','DNS','Netlogon','DFSR','Kdc','W32Time','IsmServ')
+            $types=@{}
+            try { $types=Get-AssessmentServiceTypes } catch { } # Legacy-name fallback if type metadata is unavailable.
             Get-CimInstance Win32_Service -OperationTimeoutSec 8 | Where-Object { $_.StartMode -eq 'Auto' -or $_.Name -in $names } |
-                ForEach-Object { [pscustomobject]@{name=$_.Name;state=$_.State;startMode=$_.StartMode} }
+                ForEach-Object {
+                    $record=[pscustomobject]@{name=$_.Name;state=$_.State;startMode=$_.StartMode}
+                    if ($types.ContainsKey($_.Name)) {
+                        $type=$types[$_.Name]
+                        $perUser=($type -band 64) -ne 0 -and $_.Name -match '^.+_[0-9a-fA-F]+$'
+                        $record | Add-Member NoteProperty serviceType $type
+                        $record | Add-Member NoteProperty isPerUserInstance ([bool]$perUser)
+                    }
+                    $record
+                }
         }
         'Shares' {
             Get-CimInstance Win32_Share -OperationTimeoutSec 8 | Where-Object Name -in @('SYSVOL','NETLOGON') |
@@ -125,7 +177,16 @@ function Invoke-AssessmentProbe {
             Get-AssessmentLocalEvidence -Kind $kind -Context $context
         } -ArgumentList (Join-Path $PSScriptRoot 'Migration.Assessment.ps1'),$Kind,$Context
         $null=Wait-Job $job -Timeout $TimeoutSeconds
-        if ($job.State -ne 'Completed') { throw "Probe $Kind timed out or failed; not verified." }
+        if ($job.State -in @('Running','NotStarted','Blocked')) { throw "Probe $Kind timed out after $TimeoutSeconds seconds; not verified." }
+        if ($job.State -ne 'Completed') {
+            # A failed job retains the native error on its child job. A generic
+            # timeout message would hide fast failures such as access/exit errors.
+            $reason=@($job.ChildJobs | ForEach-Object { if ($_.JobStateInfo.Reason) { $_.JobStateInfo.Reason.Message } }) -join '; '
+            if (-not $reason) {
+                $reason=@($job.ChildJobs | ForEach-Object { $_.Error | ForEach-Object { $_.ToString() } }) -join '; '
+            }
+            throw "Probe $Kind failed (state $($job.State)): $reason"
+        }
         $data=@(Receive-Job $job -ErrorAction Stop)
         if ($Kind -in @('Identity','Services','Replication') -and $data.Count -eq 0) { throw 'No usable evidence returned.' }
         [pscustomobject]@{state='Collected';durationMs=$timer.ElapsedMilliseconds;data=$data;error=''}
@@ -165,7 +226,7 @@ function Compare-MigrationAssessment {
         }
         if ($kind -eq 'Services') {
             foreach ($service in @($previous.data)) {
-                if ($service.name -in @('VMTools','VGAuthService','VMVss','VM3DService')) { continue }
+                if ($service.name -in @('VMTools','VGAuthService','VMVss','VM3DService') -or (Test-AssessmentSessionService $service)) { continue }
                 $now=@($current.data | Where-Object name -eq $service.name)
                 if ($now.Count -ne 1) { Add-AssessmentDifference $service.name 'NewDeviation' 'Previously captured service is missing or ambiguous.'; continue }
                 $wasRunning=$service.state -eq 'Running'; $isRunning=$now[0].state -eq 'Running'
@@ -234,7 +295,7 @@ function Get-MigrationBeforeObservations {
             continue
         }
         if ($kind -eq 'Services') {
-            foreach ($service in @($probe.data | Where-Object { $_.state -ne 'Running' -and $_.name -notin @('VMTools','VGAuthService','VMVss','VM3DService') })) {
+            foreach ($service in @($probe.data | Where-Object { $_.state -ne 'Running' -and $_.name -notin @('VMTools','VGAuthService','VMVss','VM3DService') -and -not (Test-AssessmentSessionService $_) })) {
                 [pscustomobject]@{check=$service.name;classification='ExistingDeviation';detail="Before: state=$($service.state), start=$($service.startMode)."}
             }
         } elseif ($kind -eq 'Shares') {
@@ -279,6 +340,7 @@ function Write-MigrationAssessmentReport {
     [ordered]@{operationalStatus=$status;stage=$Snapshot.stage;checkLevel=$Snapshot.checkLevel;computerName=$Snapshot.computerName;capturedAtUtc=$Snapshot.capturedAtUtc;baselineCompared=($Snapshot.stage -eq 'After' -and -not @($Comparison | Where-Object { $_.check -eq 'Baseline' -and $_.classification -eq 'NotVerified' }).Count);note='Migration action results are in PostMigrationReport. This evidence is not full application acceptance.'} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'AssessmentSummary.json') -Encoding UTF8
     $labels=@{ExistingDeviation='Befintlig avvikelse';NewDeviation='Ny avvikelse';Recovered='Återhämtad';NotVerified='Ej verifierat';NewEvent='Ny logghändelse - utred';RecurringEvent='Återkommande logghändelse - utred';NoDeviation='Ingen avvikelse'}
     $lines=@('Migreringskontroll / driftunderlag',"Server: $($Snapshot.computerName)","UTC: $($Snapshot.capturedAtUtc)","Kontrollnivå: $($Snapshot.checkLevel)","Driftunderlag: $status",'Migreringsåtgärdernas resultat finns separat i PostMigrationReport.','Logghändelser är observationer, inte automatiskt bevis på felorsak eller återhämtning.','')
+    $lines+='User-session service instances remain in Snapshot.json but are excluded from server-service health comparison.'
     foreach ($group in @($Comparison | Group-Object classification)) { $lines+="$($labels[$group.Name]): $($group.Count)" }
     $lines+=''
     foreach ($key in $Snapshot.probes.Keys) { $lines+="$key : $($Snapshot.probes[$key].state), $($Snapshot.probes[$key].durationMs) ms; $($Snapshot.probes[$key].error)" }

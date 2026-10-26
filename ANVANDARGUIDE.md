@@ -81,6 +81,13 @@ kör extra djupdiagnostik separat om den behövs.
 .\Migrate-VmwareToProxmox.ps1 -Phase ReadinessCheck -CheckLevel Deep
 ```
 
+Användarspecifika tjänsteinstanser, exempelvis `CDPUserSvc_<id>` och
+`WpnUserService_<id>`, ligger kvar i råunderlaget men räknas inte som saknade
+servertjänster när sessionssuffixet ändras vid inloggning eller omstart.
+Ny insamling sparar Windows tjänstetyp. Äldre underlag använder en begränsad lista
+med kända Windows-tjänster; godtyckliga servertjänster med hexadecimala suffix
+undantas inte. Detta ändrar inga tjänsters starttyp eller körläge.
+
 Standardinsamlingen sparar lokala automatiska/centrala tjänster och, för DC,
 SYSVOL/NETLOGON inklusive deras lokala katalogers tillgänglighet samt inkommande
 replikeringsstatus per partner och partition. Den gör ingen domäninventering och
@@ -96,7 +103,10 @@ markeras underlaget som begränsat. Vid behov granskar driftansvarig EVTX-filern
 Lokala insamlingsmoment har normalt 20 sekunders tidsgräns var. Native export/
 repadmin begränsas till 12 sekunder. Tiden per moment skrivs i rapporten. Den
 fördjupade DC-körningen har en total gräns på 300 sekunder. Timeout eller saknad
-åtkomst är **ej verifierat**. Inga migreringsåtgärder eller drivrutinsinstallationer
+åtkomst är **ej verifierat**. En snabb process ska redovisa sin verkliga exitkod;
+en saknad exitkod tolkas inte som vare sig lyckad eller misslyckad Windows-kontroll.
+Insamlingsfel visar den faktiska felorsaken i rapporten och skiljs från timeout.
+Inga migreringsåtgärder eller drivrutinsinstallationer
 avslutas av dessa diagnostikgränser.
 
 **Full domänkontroll är separat och valbar**, exempelvis för driftansvarig:

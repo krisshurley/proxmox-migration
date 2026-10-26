@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Captures pre-migration state from a VMware-hosted Windows Server VM.
 
@@ -50,6 +50,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Migration.Common.ps1')
+. (Join-Path $PSScriptRoot 'Migration.Assessment.ps1')
 if ($WhatIfPreference) { Write-Host 'WhatIf: Capture state and optionally disable VMware Tools; no files or services changed.'; exit 0 }
 
 function New-MigrationPath {
@@ -85,7 +86,7 @@ $IpConfigPath = Join-Path $StatePath 'ipconfig-all.txt'
 $ArpPath = Join-Path $StatePath 'arp-a.txt'
 $SchemaVersion = '1.0'
 # Fixed internal build stamp (not the -ScriptVersion parameter) to verify which copy is deployed.
-$CodeRevision = '2026-10-22.3'
+$CodeRevision = '2026-10-26.2'
 $script:LogWriter = $null
 $script:TranscriptStarted = $false
 $script:Results = New-Object System.Collections.ArrayList
@@ -403,8 +404,17 @@ function Get-PartitionVolumeState {
 
 function Get-ServiceState {
     $services = @(Get-CimInstance Win32_Service -ErrorAction Stop)
+    $types=@{}
+    try { $types=Get-AssessmentServiceTypes } catch { }
     return [pscustomobject][ordered]@{
-        all = @($services | ForEach-Object { [pscustomobject][ordered]@{ name = $_.Name; displayName = $_.DisplayName; status = $_.State; startType = $_.StartMode; serviceAccount = $_.StartName; executablePath = Get-SafeExecutablePath $_.PathName } })
+        all = @($services | ForEach-Object {
+            $record=[pscustomobject][ordered]@{ name = $_.Name; displayName = $_.DisplayName; status = $_.State; startType = $_.StartMode; serviceAccount = $_.StartName; executablePath = Get-SafeExecutablePath $_.PathName }
+            if ($types.ContainsKey($_.Name)) {
+                $record | Add-Member NoteProperty serviceType $types[$_.Name]
+                $record | Add-Member NoteProperty isPerUserInstance ([bool](($types[$_.Name] -band 64) -ne 0 -and $_.Name -match '^.+_[0-9a-fA-F]+$'))
+            }
+            $record
+        })
         runningBeforeMigration = @($services | Where-Object State -eq 'Running' | ForEach-Object Name)
     }
 }

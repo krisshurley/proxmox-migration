@@ -1,4 +1,4 @@
-<#!
+﻿<#!
 .SYNOPSIS
     Tests whether a VMware-hosted Windows Server VM is ready for migration to Proxmox with Veeam.
 
@@ -85,7 +85,7 @@ $LogPath = Join-Path $LogDirectory 'MigrationReadiness.log'
 $JsonPath = Join-Path $RootPath 'MigrationReadiness.json'
 $TextPath = Join-Path $RootPath 'MigrationReadiness.txt'
 $SchemaVersion = '1.0'
-$ScriptVersion = '1.2.0'
+$ScriptVersion = '1.2.1'
 $script:Results = New-Object System.Collections.ArrayList
 $script:LogWriter = $null
 $script:StartedAt = [DateTime]::UtcNow

@@ -130,8 +130,8 @@ try {
         }
     }
     if ($script:InteractiveMenu -and $Phase -eq 'ReadinessCheck' -and -not $script:LevelExplicit) {
-        Write-Host 'Kontrollnivå: 1) Migreringskontroll (standard)  2) Fördjupad kontroll av denna server'
-        switch (Read-Host 'Val [1]') {
+        Write-Host 'Check level: 1) Migration checks (default)  2) Deep checks for this server'
+        switch (Read-Host 'Select level [1]') {
             '2' { $CheckLevel='Deep' }
             { $_ -in @('','1') } { $CheckLevel='Migration' }
             default { throw 'Invalid check level selection.' }
@@ -180,7 +180,7 @@ try {
             $capturedLevel=Get-MigrationCapturedAssessmentLevel $selectedState
             if ($script:LevelExplicit -and $CheckLevel -ne $capturedLevel) { throw 'Check level differs from the before capture. Run extra deep diagnostics separately to preserve comparable assessment levels.' }
             $CheckLevel=$capturedLevel
-            Write-Host "Kontrollnivå från insamlingen: $CheckLevel"
+            Write-Host "Check level from capture: $CheckLevel"
             # Also checked by the standalone restore script; never race Firstboot.
             $firstboot = Assert-MigrationFirstbootComplete -FirstbootNotUsed:$FirstbootNotUsed
             Write-Host "Firstboot status: $($firstboot.state)"

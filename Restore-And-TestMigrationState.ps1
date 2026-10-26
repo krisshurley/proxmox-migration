@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Restores and validates migration state after a VMware-to-Proxmox Veeam restore.
 
@@ -109,7 +109,7 @@ $ReportHtmlPath = Join-Path $ReportDirectory 'PostMigrationReport.html'
 $ReportTextPath = Join-Path $ReportDirectory 'PostMigrationReport.txt'
 $SchemaVersion = '1.0'
 # Fixed internal build stamp to verify which copy is deployed on a target machine.
-$CodeRevision = '2026-10-26.1'
+$CodeRevision = '2026-10-26.2'
 $script:LogWriter = $null
 $script:Results = New-Object System.Collections.ArrayList
 $script:Actions = New-Object System.Collections.ArrayList
@@ -970,9 +970,9 @@ function Compare-Services {
     $baseline = @(Get-MigrationProperty $script:PreState.services 'all' @())
     if ($baseline.Count -eq 0) { Add-Result 'Running services' 'NOT_CHECKED' 'The source service baseline is unavailable.'; return }
     $current = @(Get-CimInstance Win32_Service -ErrorAction Stop | Where-Object { $_.State -eq 'Running' } | ForEach-Object Name)
-    $expected = @($baseline | Where-Object { $_.startType -eq 'Auto' -and $_.status -eq 'Running' } | ForEach-Object name)
+    $expected = @($baseline | Where-Object { $_.startType -eq 'Auto' -and $_.status -eq 'Running' })
     $vmware = @('VMTools', 'VGAuthService', 'VMVss', 'VM3DService', 'vdservice')
-    $missing = @($expected | Where-Object { $_ -notin $current -and $_ -notin $vmware -and $_ -notmatch '_[0-9a-fA-F]+$' })
+    $missing = @($expected | Where-Object { $_.name -notin $current -and $_.name -notin $vmware -and -not (Test-AssessmentSessionService $_) } | ForEach-Object name)
     # A trigger-start service that ran in the baseline is still compared; a trigger
     # registry key must not hide a newly stopped application or networking service.
     if ($missing.Count) { Add-Result 'Running services' 'WARNING' 'Automatic services that were running on the source are now stopped or missing.' $missing }
