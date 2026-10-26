@@ -4,7 +4,8 @@ For the Swedish operator walkthrough, start with [Användarguide](ANVANDARGUIDE.
 For Windows Notepad, open [ANVANDARGUIDE.txt](ANVANDARGUIDE.txt) in the same folder.
 The text version includes the complete guide, uses UTF-8 with BOM and Windows
 line endings, and requires no Markdown viewer or PDF reader.
-This README provides the technical reference and advanced options.
+This README describes the menu workflow first, followed by the technical reference
+and advanced shortcuts.
 
 When editing the guide, update `ANVANDARGUIDE.md` and regenerate the text mirror
 from the repository root with `python3 tools/export_user_guide.py`. Verify it with
@@ -47,21 +48,88 @@ These scripts do not modify Firstboot's injected scripts or reboot policy.
 
 ## Quick start
 
-Run from an elevated Windows PowerShell session. Absolute script paths work;
-offline files are resolved relative to the script directory by default.
+Use the menu for normal migrations. Open **Windows PowerShell as Administrator**,
+change to the folder containing the scripts, and run:
+
+```powershell
+.\Migrate-VmwareToProxmox.ps1
+```
+
+The menu is:
+
+```text
+1) ReadinessCheck  2) Prepare  3) ValidatePost  4) Exit
+```
+
+Run the script again each time you want to select the next phase:
+
+1. **On the original VMware VM, choose 1.** Select `1) Migration checks` for the
+   normal workflow, or `2) Deep checks for this server` when additional diagnostics
+   are needed. Review the results. A missing storage driver at this point produces
+   a warning directing you to step 2; it does not approve the VM for migration.
+2. **On the original VMware VM, choose 2.** Confirm preparation. It installs and
+   verifies the storage driver, exports migration state, and stops/disables VMware
+   Tools services after saving their original state. Driver verification failures
+   stop preparation. Keep the printed `StateDirectory` and include the complete
+   export and before evidence in the backup. You do not need to rerun step 1 after
+   successful preparation. Complete any explicitly required reboot before backup.
+3. **Take the final backup and restore to Proxmox.** For a production cutover, keep
+   the original VM off before connecting the restored copy to the production network.
+   Wait for Guestfs/Firstboot and its automatic restarts to finish.
+4. **On the restored Proxmox VM, choose 3.** It uses the captured check level,
+   restores networking, handles remaining VMware Tools, and validates the result.
+   Do not select step 1 on the restored VM as an after-check; it creates new before
+   evidence.
+5. **Review the latest run's HTML reports:**
+   - `Restore-And-TestMigrationState*\Reports\PostMigrationReport.html` for migration
+     actions, failures and follow-up work.
+   - `Restore-And-TestMigrationState*\Assessment\Report.html` for before/after
+     operational evidence and items that could not be verified.
+   - With Deep on a DC, also review
+     `Assessment\<timestamp>_PostMigration\FullReport.html` inside that restore run.
+
+The normal order is **1 → 2 → backup/restore → 3**. Reports are created in unique
+folders under `C:\Rutin_migration_yyyy-MM-dd`; a repeat run may add a time suffix.
+The console prints the exact paths. Review warnings rather than treating either
+a warning or a successful migration check as full application/DC acceptance.
+
+If execution policy blocks the script, run this in the same PowerShell window
+and then start the menu again. It affects only that session and may still be
+overridden by an organization policy:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\Migrate-VmwareToProxmox.ps1 -Phase ReadinessCheck
-.\Migrate-VmwareToProxmox.ps1 -Phase Prepare
 ```
 
-Without `-Phase`, the main script displays a phase menu. Server role is detected
-from Windows; DC checks cannot accidentally be skipped by choosing Normal.
+Absolute script paths also work; offline files are resolved relative to the script
+directory by default. Server role is detected from Windows.
 `-ServerType DomainController` or `Normal` may be supplied as an assertion and
 must agree with the detected role. Administrator membership is checked; it does
 not prove that an account is local or that domain login will work without a network.
 Plan console access and appropriate recovery credentials before migration.
+
+### Advanced shortcuts: select a phase directly
+
+`-Phase` skips the phase menu and runs the selected phase with the same safeguards.
+Run each command at the corresponding point in the workflow; these are not three
+commands to run consecutively on the same VM.
+
+```powershell
+# Original VMware VM: equivalent to menu option 1 (normal Migration checks).
+.\Migrate-VmwareToProxmox.ps1 -Phase ReadinessCheck
+
+# Original VMware VM: equivalent to menu option 2; still asks for confirmation.
+.\Migrate-VmwareToProxmox.ps1 -Phase Prepare
+
+# Restored Proxmox VM: equivalent to menu option 3, after Firstboot finishes.
+.\Migrate-VmwareToProxmox.ps1 -Phase ValidatePost
+```
+
+To select Deep directly, use `-Phase ReadinessCheck -CheckLevel Deep` at the start.
+Prepare and ValidatePost reuse the saved level. Do not change profiles midway
+through a migration. To select a particular export, pass `-StateDirectory` as shown
+below. Extra parameters can also be used with the menu; for example,
+`-AdapterMappingPath` supplies an explicit NIC mapping without selecting a phase.
 
 ### Automatic server-role detection and DC checks
 
@@ -159,8 +227,12 @@ checked before restoration. Logs/reports use a new directory for each run.
 
 `-DriverPreparation Install` is the default and preserves source-side VirtIO SCSI
 preparation. The offline EXE and reviewed initialization script must be present.
-Readiness checks require vioscsi by default; standalone readiness supports
-`-RequiredStorageDriver viostor` for a verified VirtIO Block target.
+Menu step 1 uses `StorageDriverMode BeforePrepare`: a missing vioscsi driver warns
+that step 2 must prepare it. Prepare must verify the driver successfully before
+export and source service changes. Standalone `Test-MigrationReadiness.ps1` keeps
+the stricter `StorageDriverMode Installed` default, which fails if the required
+driver is missing; it supports `-RequiredStorageDriver viostor` for a verified
+VirtIO Block target.
 A driver installation or binding failure stops Prepare. Reboot-required status
 3010 is reported as a warning; review readiness and complete a planned reboot if
 required before taking the final migration backup. If settings change afterward,
@@ -578,8 +650,10 @@ DC health can also be run separately:
 .\Test-DCMigrationHealth.ps1 -Mode PostMigration -CompareWith '<previous Results.json>'
 ```
 
-These checks require the ActiveDirectory module and appropriate permissions.
-The main script automatically runs them for a detected DC and propagates failures.
+These standalone checks require the ActiveDirectory module and appropriate
+permissions. In the menu workflow they run only for a detected DC with Deep
+selected, scoped to that server. Their deviations are reported for review;
+standard Migration checks do not run the full DC health script.
 
 ## Exit codes
 

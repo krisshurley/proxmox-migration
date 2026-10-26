@@ -122,7 +122,7 @@ ActiveDirectory-modulen; standardinsamlingen kräver den inte.
 Om betrodda, nedladdade filer är blockerade kan du avblockera dem i skriptmappen:
 
 ```powershell
-Unblock-File -Path .\*
+Unblock-File *
 ```
 
 Om PowerShells körningspolicy blockerar skript kan du, om er lokala policy medger
