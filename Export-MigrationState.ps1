@@ -86,7 +86,7 @@ $IpConfigPath = Join-Path $StatePath 'ipconfig-all.txt'
 $ArpPath = Join-Path $StatePath 'arp-a.txt'
 $SchemaVersion = '1.0'
 # Fixed internal build stamp (not the -ScriptVersion parameter) to verify which copy is deployed.
-$CodeRevision = '2026-10-26.2'
+$CodeRevision = '2026-10-27.1'
 $script:LogWriter = $null
 $script:TranscriptStarted = $false
 $script:Results = New-Object System.Collections.ArrayList
@@ -494,8 +494,18 @@ function Get-NetworkCapture {
     }
 }
 
+function Capture-BiosSerialNumber {
+    $script:Capture.systemIdentity.biosSerialNumber = $null
+    Invoke-CapturePart 'BIOS serial number' {
+        $serial = Get-MigrationBiosSerialNumber
+        $script:Capture.systemIdentity.biosSerialNumber = $serial
+        Add-Result 'BIOS serial number' 'PASS' 'Source BIOS serial number captured for manual Proxmox configuration when needed.' @("SerialNumber: $serial")
+    }
+}
 function Write-TextReport {
-    $lines = @('Pre-migration state capture', ('Schema version: ' + $SchemaVersion), ('Captured UTC: ' + $script:Capture.capturedAtUtc), ('Computer: ' + $script:Capture.systemIdentity.computerName), '', 'Safety results:')
+    $serial = Get-MigrationProperty $script:Capture.systemIdentity 'biosSerialNumber'
+    $serialDisplay = if ([string]::IsNullOrWhiteSpace([string]$serial)) { 'Not available; see capture warnings.' } else { [string]$serial }
+    $lines = @('Pre-migration state capture', ('Schema version: ' + $SchemaVersion), ('Captured UTC: ' + $script:Capture.capturedAtUtc), ('Computer: ' + $script:Capture.systemIdentity.computerName), ('BIOS serial number: ' + $serialDisplay), '', 'Safety results:')
     foreach ($result in $script:Results) { $lines += "[$($result.state)] $($result.name): $($result.summary)" }
     $lines += ''; $lines += 'Output files:'; $lines += $StateJsonPath; $lines += $NetworkJsonPath; $lines += $RoutePath; $lines += $IpConfigPath; $lines += $ArpPath
     $lines | Set-Content -Path $StateTextPath -Encoding UTF8
@@ -554,6 +564,7 @@ try {
         captureStatus = [ordered]@{ complete = $false; warnings = @() }
         outputFiles = @($StateJsonPath, $StateTextPath, $NetworkJsonPath, $RoutePath, $IpConfigPath, $ArpPath, $LogPath, $TranscriptPath)
     }
+    Capture-BiosSerialNumber
     Invoke-CapturePart 'Network configuration' { $script:Capture.network = Get-NetworkCapture }
     Invoke-CapturePart 'Raw network outputs' { Invoke-RawNetworkCapture }
     Invoke-CapturePart 'Disk information' { $script:Capture.disks = @(Get-DiskState) }

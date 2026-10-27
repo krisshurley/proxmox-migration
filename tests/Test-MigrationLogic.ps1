@@ -384,6 +384,46 @@ try {
     Import-FunctionDefinitions 'Migrate-VmwareToProxmox.ps1' @('Invoke-CheckedMigrationScript', 'Resolve-MigrationServerType', 'Write-MigrationCaptureSummary')
     $script:Mode = 'Full'
 
+    Test-Case 'BIOS serial collection preserves VMware spacing and requests the documented property' {
+        function Get-CimInstance {
+            param($ClassName,$Property,$ErrorAction)
+            Assert-True ($ClassName -eq 'Win32_BIOS' -and $Property -eq 'SerialNumber' -and $ErrorAction -eq 'Stop') 'Wrong BIOS query.'
+            [pscustomobject]@{SerialNumber='VMware-00 11 22 33 44 55 66 77-88 99 aa bb cc dd ee ff'}
+        }
+        Assert-True ((Get-MigrationBiosSerialNumber) -ceq 'VMware-00 11 22 33 44 55 66 77-88 99 aa bb cc dd ee ff') 'Original serial value changed.'
+    }
+    Test-Case 'BIOS serial collection rejects empty ambiguous and failed queries' {
+        foreach ($variant in @('NoInstance','Empty','Multiple','ProviderFailure')) {
+            function Get-CimInstance {
+                param($ClassName,$Property,$ErrorAction)
+                switch ($variant) {
+                    'NoInstance' { @() }
+                    'Empty' { [pscustomobject]@{SerialNumber='   '} }
+                    'Multiple' { [pscustomobject]@{SerialNumber='A'};[pscustomobject]@{SerialNumber='B'} }
+                    'ProviderFailure' { throw 'BIOS query denied' }
+                }
+            }
+            Assert-Throws { Get-MigrationBiosSerialNumber }
+        }
+    }
+    Test-Case 'Export retains BIOS serial in JSON and readable text and warns on failure' {
+        Import-FunctionDefinitions 'Export-MigrationState.ps1' @('Capture-BiosSerialNumber','Invoke-CapturePart','Write-TextReport')
+        function Write-Log { param($Message,$Color) }
+        function Get-CimInstance { param($ClassName,$Property,$ErrorAction) [pscustomobject]@{SerialNumber='VMware-00 11-22 33'} }
+        $script:Capture=[ordered]@{capturedAtUtc='2026-10-27T10:00:00Z';systemIdentity=[ordered]@{computerName='TEST01'}}
+        Capture-BiosSerialNumber
+        $roundtrip=$script:Capture | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+        Assert-True ($roundtrip.systemIdentity.biosSerialNumber -ceq 'VMware-00 11-22 33') 'Serial missing from exported identity.'
+        $SchemaVersion='1.0';$StateTextPath=Join-Path $script:TempRoot 'serial-report.txt'
+        $StateJsonPath='state.json';$NetworkJsonPath='network.json';$RoutePath='routes.txt';$IpConfigPath='ip.txt';$ArpPath='arp.txt'
+        Write-TextReport
+        Assert-True ((Get-Content $StateTextPath -Raw) -match 'BIOS serial number: VMware-00 11-22 33') 'Readable report omitted serial.'
+        function Get-CimInstance { param($ClassName,$Property,$ErrorAction) throw 'BIOS query denied' }
+        Capture-BiosSerialNumber
+        Assert-True ($null -eq $script:Capture.systemIdentity.biosSerialNumber -and $script:Results[-1].state -eq 'WARNING') 'Failed query retained a stale serial or did not warn.'
+        Write-TextReport
+        Assert-True ((Get-Content $StateTextPath -Raw) -match 'BIOS serial number: Not available') 'Unavailable serial was not explicit.'
+    }
     Test-Case 'Firstboot requires evidence when no conversion is detected' {
         function Get-CimInstance { param($ClassName) @() }
         $path = Join-Path $script:TempRoot 'absent'

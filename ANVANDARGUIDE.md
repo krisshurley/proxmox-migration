@@ -179,6 +179,17 @@ i backupen. Bekräfta åtgärden när du får frågan. Prepare gör ändringar p
 
 **Exporten ingår redan i steg 2. Du behöver inte köra något separat exportsteg.**
 
+BIOS-serienumret samlas in i både steg 1 och steg 2. Originalvärdet finns tydligt
+i `Export-MigrationState*\State\PreMigrationState.txt` och i JSON-filens
+`systemIdentity.biosSerialNumber`. Om en applikation kräver samma serienummer
+efter flytten kan ni använda detta underlag när ni konfigurerar VM:en i Proxmox.
+Skriptet ändrar inte serienumret automatiskt. Om värdet inte kan läsas visas en
+varning. Kommandot för att kontrollera det manuellt på original-VM:en är:
+
+```powershell
+Get-CimInstance Win32_BIOS | Select-Object SerialNumber
+```
+
 Normal ordning är **1 → 2 → backup/återläsning → 3**. Du behöver inte köra
 steg 1 igen efter en lyckad Prepare. Det fristående `Test-MigrationReadiness.ps1`
 kräver fortfarande installerad lagringsdrivrutin som standard; menyn använder

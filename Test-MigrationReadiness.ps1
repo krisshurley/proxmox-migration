@@ -90,7 +90,7 @@ $LogPath = Join-Path $LogDirectory 'MigrationReadiness.log'
 $JsonPath = Join-Path $RootPath 'MigrationReadiness.json'
 $TextPath = Join-Path $RootPath 'MigrationReadiness.txt'
 $SchemaVersion = '1.0'
-$ScriptVersion = '1.2.2'
+$ScriptVersion = '1.2.3'
 $script:Results = New-Object System.Collections.ArrayList
 $script:LogWriter = $null
 $script:StartedAt = [DateTime]::UtcNow
@@ -447,6 +447,10 @@ function Get-SystemIdentity {
             "Time zone: $([TimeZoneInfo]::Local.Id)"
         )
         Add-CheckResult 'Basic system identity' 'PASS' 'System identity was captured.' $details | Out-Null
+    }
+    Invoke-ReadOnlyCheck 'BIOS serial number' {
+        $serial = Get-MigrationBiosSerialNumber
+        Add-CheckResult 'BIOS serial number' 'PASS' 'Source BIOS serial number captured for manual Proxmox configuration when needed.' @("SerialNumber: $serial") | Out-Null
     }
 }
 

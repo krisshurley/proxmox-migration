@@ -605,6 +605,18 @@ disk/volume, service, role, share, task, listening-port and event baselines plus
 `ipconfig /all`, `route print -4` and `arp -a` outputs. Protect access to capture
 files because they contain internal infrastructure information.
 
+Steps 1 and 2 also read `Win32_BIOS.SerialNumber`. The export preserves the source
+value in `PreMigrationState.json` under `systemIdentity.biosSerialNumber` and
+displays it near the top of `PreMigrationState.txt`. Use this value when manually
+configuring the restored VM's serial number in Proxmox if required by an application.
+No Proxmox configuration or serial-number change is performed by the scripts.
+An empty, ambiguous or unreadable BIOS value produces a visible collection warning;
+the remaining capture continues. Manual query on the source VM:
+
+```powershell
+Get-CimInstance Win32_BIOS | Select-Object SerialNumber
+```
+
 The main script's **2) Prepare** preserves the original behavior: it captures and
 writes the original service baseline first, then stops/disables `VMTools`,
 `VGAuthService`, `VMVss` and `VM3DService` when present. Source Tools are not

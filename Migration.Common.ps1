@@ -10,6 +10,15 @@ function Get-MigrationProperty {
     return $Default
 }
 
+function Get-MigrationBiosSerialNumber {
+    $bios = @(Get-CimInstance -ClassName Win32_BIOS -Property SerialNumber -ErrorAction Stop)
+    if ($bios.Count -ne 1) { throw 'Expected exactly one Win32_BIOS instance; BIOS serial number could not be verified.' }
+    $serial = [string](Get-MigrationProperty $bios[0] 'SerialNumber')
+    if ([string]::IsNullOrWhiteSpace($serial)) { throw 'Win32_BIOS returned an empty serial number.' }
+    # Preserve the original value, including VMware serial-number spacing.
+    return $serial
+}
+
 function Resolve-MigrationStateDirectory {
     param([string]$StateDirectory, [string]$SearchRoot = 'C:\', [string]$ComputerName = $env:COMPUTERNAME)
     if ($StateDirectory) {
