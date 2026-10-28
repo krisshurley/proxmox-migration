@@ -424,6 +424,88 @@ try {
         Write-TextReport
         Assert-True ((Get-Content $StateTextPath -Raw) -match 'BIOS serial number: Not available') 'Unavailable serial was not explicit.'
     }
+    Test-Case 'Readiness terminal summary lists all failures warnings and unavailable checks' {
+        Import-FunctionDefinitions 'Test-MigrationReadiness.ps1' @('Write-ReadinessConsoleSummary')
+        $script:SummaryLines=@()
+        function Write-Log { param([Parameter(Mandatory=$true)][string]$Message,$Color) $script:SummaryLines += $Message }
+        $report=[pscustomobject]@{overallStatus='FAIL';counts=@{PASS=1;WARNING=1;FAIL=1;NOT_CHECKED=1};checks=@(
+            [pscustomobject]@{name='Healthy disk';state='PASS';summary='Healthy';details=@();error=''},
+            [pscustomobject]@{name='Mounted media';state='FAIL';summary='Remove ISO';details=@('D: media');error=''},
+            [pscustomobject]@{name='Windows service health';state='WARNING';summary='Stopped service';details=@('spice-agent: state=Stopped');error=''},
+            [pscustomobject]@{name='BIOS serial number';state='NOT_CHECKED';summary='Unavailable';details=@();error='Query failed'}
+        )}
+        $before=$report | ConvertTo-Json -Depth 5
+        Write-ReadinessConsoleSummary $report
+        $output=$script:SummaryLines -join "`n"
+        Assert-True ($output -match 'Blocking issues:' -and $output -match '\[FAIL\] Mounted media' -and $output -match '\[WARNING\] Windows service health' -and $output -match 'spice-agent: state=Stopped' -and $output -match '\[NOT_CHECKED\] BIOS serial number') 'Final list lost an issue, its state or service details.'
+        Assert-True ($output -match 'Overall readiness: FAIL' -and $output -notmatch 'Healthy disk') 'Summary hid failure or repeated successful checks.'
+        Assert-True (($report | ConvertTo-Json -Depth 5) -ceq $before) 'Presentation changed the underlying report.'
+    }
+    Test-Case 'Readiness terminal summary explicitly shows no blocking issues or warnings on PASS' {
+        $script:SummaryLines=@()
+        function Write-Log { param([Parameter(Mandatory=$true)][string]$Message,$Color) $script:SummaryLines += $Message }
+        Write-ReadinessConsoleSummary ([pscustomobject]@{overallStatus='PASS';counts=@{PASS=1;WARNING=0;FAIL=0;NOT_CHECKED=0};checks=@()})
+        Assert-True (@($script:SummaryLines | Where-Object { $_ -eq '  None' }).Count -eq 2) 'Empty issue lists were unclear.'
+        Assert-True ($script:SummaryLines[-1] -eq 'Overall readiness: PASS') 'Overall status was lost.'
+    }
+    Test-Case 'Readiness summary bounds long event details without dropping warning entries' {
+        $script:SummaryLines=@()
+        function Write-Log { param([Parameter(Mandatory=$true)][string]$Message,$Color) $script:SummaryLines += $Message }
+        $checks=@(1..5 | ForEach-Object { [pscustomobject]@{name="Event check $_";state='WARNING';summary='Review events';details=@(('x'*1000),"Line1`r`nLine2",'third','fourth');error=''} })
+        Write-ReadinessConsoleSummary ([pscustomobject]@{overallStatus='WARNING';counts=@{PASS=0;WARNING=5;FAIL=0;NOT_CHECKED=0};checks=$checks})
+        Assert-True (@($script:SummaryLines | Where-Object { $_ -match '\[WARNING\] Event check' }).Count -eq 5) 'A warning was omitted.'
+        Assert-True (@($script:SummaryLines | Where-Object { $_ -match '1 more detail' }).Count -eq 5) 'Hidden details were not disclosed.'
+        Assert-True (@($script:SummaryLines | Where-Object { $_.Length -gt 250 -or $_ -match "`n" }).Count -eq 0) 'Long event detail overwhelmed the final list.'
+    }
+    Test-Case 'Capture summary includes availability warnings without modifying capture results' {
+        Import-FunctionDefinitions 'Export-MigrationState.ps1' @('Write-CaptureConsoleSummary')
+        $script:SummaryLines=@();$script:CaptureRunFinished=$true
+        function Write-Log { param([Parameter(Mandatory=$true)][string]$Message,$Color) $script:SummaryLines += $Message }
+        $item=[pscustomobject]@{name='Adapters';state='WARNING';summary='Two adapters';details=@('Primary','Secondary');error=''}
+        [void]$script:Results.Add($item)
+        $script:Capture=@{captureStatus=@{complete=$false;warnings=@('Adapters: Two adapters','Collection unavailable: bitLocker')}}
+        $StateJsonPath='state.json';$StateTextPath='state.txt';$NetworkJsonPath='network.json';$LogPath='capture.log'
+        $before=$script:Capture | ConvertTo-Json -Depth 5
+        Write-CaptureConsoleSummary
+        $output=$script:SummaryLines -join "`n"
+        Assert-True ($output -match 'PREPARE / STATE CAPTURE SUMMARY' -and $output -match 'WARNING: 2' -and $output -match 'Collection unavailable: bitLocker' -and $output -match 'Capture result: WARNING') 'Capture warning omitted or counted twice.'
+        Assert-True ($script:Results.Count -eq 1 -and ($script:Capture | ConvertTo-Json -Depth 5) -ceq $before) 'Presentation changed capture safety results.'
+    }
+    Test-Case 'An interrupted capture is never summarized as completed or approved' {
+        $script:SummaryLines=@();$script:CaptureRunFinished=$false;$script:Capture=@{}
+        function Write-Log { param([Parameter(Mandatory=$true)][string]$Message,$Color) $script:SummaryLines += $Message }
+        $LogPath='capture.log'
+        [void]$script:Results.Add([pscustomobject]@{name='Mounted media';state='FAIL';summary='Remove ISO';details=@();error=''})
+        Write-CaptureConsoleSummary
+        $output=$script:SummaryLines -join "`n"
+        Assert-True ($output -match '\[FAIL\] Mounted media' -and $output -match 'did not complete' -and $output -match 'Capture result: FAIL' -and $output -notmatch 'Capture files:') 'Early stop looked like a finished capture.'
+    }
+    Test-Case 'Post summary separates operational review from migration status and retains manual actions' {
+        $script:SummaryLines=@()
+        function Write-Log { param([Parameter(Mandatory=$true)][string]$Message,$Color) $script:SummaryLines += $Message }
+        $assessmentPath=Join-Path $script:TempRoot 'console-assessment.json'
+        '{"operationalStatus":"ReviewRequired"}' | Set-Content $assessmentPath
+        $summary=@{counts=@{PASS=1;WARNING=0;FAIL=0;NOT_CHECKED=0};overallStatus='PASS';migrationChecksStatus='PASS';operationalAssessmentPath=$assessmentPath;manualActions=@('Review the existing application issue.')}
+        $before=$summary | ConvertTo-Json -Depth 5
+        Write-PostMigrationConsoleSummary $summary
+        $output=$script:SummaryLines -join "`n"
+        Assert-True ($output -match 'POST-MIGRATION SUMMARY' -and $output -match 'Migration checks: PASS' -and $output -match 'Operational evidence: ReviewRequired' -and $output -match 'Review the existing application issue.' -and $output -match 'Report.html') 'Operational status, follow-up or report path lost.'
+        Assert-True (($summary | ConvertTo-Json -Depth 5) -ceq $before) 'Console display modified the migration outcome.'
+    }
+    Test-Case 'Post summary does not imply healthy evidence when missing or unreadable' {
+        foreach ($variant in @('Missing','Unreadable')) {
+            $script:SummaryLines=@()
+            function Write-Log { param([Parameter(Mandatory=$true)][string]$Message,$Color) $script:SummaryLines += $Message }
+            $assessmentPath=Join-Path $script:TempRoot ("$variant-assessment.json")
+            if ($variant -eq 'Unreadable') { '{invalid' | Set-Content $assessmentPath }
+            $summary=@{counts=@{PASS=0;WARNING=0;FAIL=1;NOT_CHECKED=0};overallStatus='FAIL';migrationChecksStatus='FAIL';operationalAssessmentPath=$assessmentPath;manualActions=@()}
+            Write-PostMigrationConsoleSummary $summary
+            $output=$script:SummaryLines -join "`n"
+            Assert-True ($output -match 'Overall result: FAIL' -and $output -notmatch 'NoObservedDeviation') 'Missing evidence changed failure to approval.'
+            $expected=if ($variant -eq 'Missing') {'Not collected in this run'} else {'NotVerified'}
+            Assert-True ($output -match $expected) 'Unavailable evidence was not explicit.'
+        }
+    }
     Test-Case 'Firstboot requires evidence when no conversion is detected' {
         function Get-CimInstance { param($ClassName) @() }
         $path = Join-Path $script:TempRoot 'absent'

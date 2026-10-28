@@ -145,6 +145,19 @@ diskar och filsystem. Dessutom sparas lokalt driftunderlag och händelseloggar.
 VSS, fullständig DCDiag och omfattande DNS-tester ingår i den fördjupade nivån.
 Serverrollen identifieras automatiskt.
 
+När readiness-kontrollen är klar visas en samlad `READINESS SUMMARY` i terminalen:
+antal godkända kontroller, blockerande fel och en lista över varningar eller
+kontroller som inte kunde verifieras. Alla avvikelser listas, med upp till tre
+korta detaljrader per kontroll. Fullständiga detaljer finns i rapporten vars
+sökväg skrivs ut direkt efter sammanfattningen.
+
+Steg 2 avslutar även exporten med `PREPARE / STATE CAPTURE SUMMARY`, inklusive
+insamlingsvarningar och sökvägar. Om förberedelsen avbryts visas `PREPARE STOPPED`.
+Steg 3 visar `POST-MIGRATION SUMMARY` med blockerande fel, varningar och manuella
+uppföljningar. `Migration checks` och `Operational evidence` redovisas separat:
+godkända migreringskontroller innebär inte att hela serverns drift är verifierad.
+Om driftunderlaget inte samlades in i körningen anges det uttryckligen.
+
 Om lagringsdrivrutinen ännu saknas ger steg 1 en varning om att köra steg 2.
 Det är normalt på en oförberedd VMware-VM och godkänner inte själva flytten.
 Steg 2 måste installera och verifiera drivrutinen innan du tar migrationsbackupen.

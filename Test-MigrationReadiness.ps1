@@ -90,7 +90,7 @@ $LogPath = Join-Path $LogDirectory 'MigrationReadiness.log'
 $JsonPath = Join-Path $RootPath 'MigrationReadiness.json'
 $TextPath = Join-Path $RootPath 'MigrationReadiness.txt'
 $SchemaVersion = '1.0'
-$ScriptVersion = '1.2.3'
+$ScriptVersion = '1.2.4'
 $script:Results = New-Object System.Collections.ArrayList
 $script:LogWriter = $null
 $script:StartedAt = [DateTime]::UtcNow
@@ -454,6 +454,11 @@ function Get-SystemIdentity {
     }
 }
 
+function Write-ReadinessConsoleSummary {
+    param($Report)
+    Write-MigrationConsoleSummary -Report $Report -Title 'READINESS SUMMARY' -ResultLabel 'Overall readiness'
+}
+
 function Write-Reports {
     $counts = @{}
     foreach ($state in @('PASS', 'WARNING', 'FAIL', 'NOT_CHECKED')) { $counts[$state] = @($script:Results | Where-Object state -eq $state).Count }
@@ -467,7 +472,7 @@ function Write-Reports {
     $lines += ''; $lines += 'Checks:'; foreach ($item in $script:Results) { $lines += "[$($item.state)] $($item.name) - $($item.summary)"; foreach ($detail in $item.details) { $lines += "    $detail" } }
     $lines += ''; $lines += 'Blocking issues:'; $lines += $(if ($blocking.Count) { $blocking } else { '  None' }); $lines += ''; $lines += 'Warnings:'; $lines += $(if ($warnings.Count) { $warnings } else { '  None' })
     $lines | Set-Content -Path $TextPath -Encoding UTF8
-    Write-Log "Overall readiness: $overall" (Get-StateColor $overall)
+    Write-ReadinessConsoleSummary $report
     Write-Log "Reports: $LogPath, $JsonPath, $TextPath" ([ConsoleColor]::Cyan)
     return @{ Overall = $overall; Counts = $counts }
 }

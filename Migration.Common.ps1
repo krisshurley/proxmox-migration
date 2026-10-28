@@ -10,6 +10,41 @@ function Get-MigrationProperty {
     return $Default
 }
 
+function Write-MigrationConsoleSummary {
+    param($Report, [string]$Title, [string]$ResultLabel, [string[]]$StatusLines = @(), [switch]$ShowManualActions, [string[]]$ManualActions = @())
+    Write-Log ' '
+    Write-Log "========== $Title ==========" ([ConsoleColor]::Cyan)
+    Write-Log ("PASS: {0}  WARNING: {1}  FAIL: {2}  NOT_CHECKED: {3}" -f $Report.counts.PASS, $Report.counts.WARNING, $Report.counts.FAIL, $Report.counts.NOT_CHECKED)
+    foreach ($group in @(
+        @{title='Blocking issues:';states=@('FAIL');color=[ConsoleColor]::Red},
+        @{title='Warnings / checks not verified:';states=@('WARNING','NOT_CHECKED');color=[ConsoleColor]::Yellow}
+    )) {
+        Write-Log $group.title $group.color
+        $items = @($Report.checks | Where-Object { $_.state -in $group.states })
+        if ($items.Count -eq 0) { Write-Log '  None' ([ConsoleColor]::Green) }
+        foreach ($item in $items) {
+            Write-Log ("  - [{0}] {1}: {2}" -f $item.state, $item.name, $item.summary) $group.color
+            # Keep the final list readable even when Deep checks contain long events.
+            $details = @($item.details | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+            foreach ($detail in @($details | Select-Object -First 3)) {
+                $line = ([string]$detail -replace '\s+', ' ').Trim()
+                if ($line.Length -gt 240) { $line = $line.Substring(0, 240) + '...' }
+                Write-Log "      $line" $group.color
+            }
+            if ($details.Count -gt 3) { Write-Log ("      ... {0} more detail(s); see the report." -f ($details.Count - 3)) $group.color }
+            if ($item.error) { Write-Log '      Collection/check error details are in the report and earlier output.' $group.color }
+        }
+    }
+    foreach ($line in $StatusLines) { Write-Log $line ([ConsoleColor]::Cyan) }
+    if ($ShowManualActions) {
+        Write-Log 'Manual follow-up actions:' ([ConsoleColor]::Yellow)
+        if ($ManualActions.Count -eq 0) { Write-Log '  None' ([ConsoleColor]::Green) }
+        foreach ($action in $ManualActions) { Write-Log "  - $action" ([ConsoleColor]::Yellow) }
+    }
+    Write-Log "$ResultLabel`: $($Report.overallStatus)" (Get-StateColor $Report.overallStatus)
+}
+
+
 function Get-MigrationBiosSerialNumber {
     $bios = @(Get-CimInstance -ClassName Win32_BIOS -Property SerialNumber -ErrorAction Stop)
     if ($bios.Count -ne 1) { throw 'Expected exactly one Win32_BIOS instance; BIOS serial number could not be verified.' }

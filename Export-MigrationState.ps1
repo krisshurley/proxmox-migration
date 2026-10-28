@@ -86,12 +86,13 @@ $IpConfigPath = Join-Path $StatePath 'ipconfig-all.txt'
 $ArpPath = Join-Path $StatePath 'arp-a.txt'
 $SchemaVersion = '1.0'
 # Fixed internal build stamp (not the -ScriptVersion parameter) to verify which copy is deployed.
-$CodeRevision = '2026-10-27.1'
+$CodeRevision = '2026-10-28.1'
 $script:LogWriter = $null
 $script:TranscriptStarted = $false
 $script:Results = New-Object System.Collections.ArrayList
 $script:StartedAt = [DateTime]::UtcNow
 $script:Capture = [ordered]@{}
+$script:CaptureRunFinished = $false
 $script:EventLogCaptureWarnings = New-Object System.Collections.ArrayList
 
 function Get-StateColor {
@@ -502,6 +503,25 @@ function Capture-BiosSerialNumber {
         Add-Result 'BIOS serial number' 'PASS' 'Source BIOS serial number captured for manual Proxmox configuration when needed.' @("SerialNumber: $serial")
     }
 }
+function Write-CaptureConsoleSummary {
+    # Include collection-availability warnings which are only stored in captureStatus.
+    # This display does not add results or change capture completeness/exit codes.
+    $items = @($script:Results)
+    $recorded = @($items | ForEach-Object { "$($_.name): $($_.summary)" })
+    $captureStatus = Get-MigrationProperty $script:Capture 'captureStatus'
+    foreach ($warning in @(Get-MigrationProperty $captureStatus 'warnings' @())) {
+        if ($warning -and $warning -notin $recorded) {
+            $items += [pscustomobject]@{name='Capture warning';state='WARNING';summary=$warning;details=@();error=''}
+        }
+    }
+    $counts = @{}
+    foreach ($state in @('PASS','WARNING','FAIL','NOT_CHECKED')) { $counts[$state]=@($items | Where-Object state -eq $state).Count }
+    $overall = if (-not $script:CaptureRunFinished -or $counts.FAIL) { 'FAIL' } elseif ($counts.WARNING -or $counts.NOT_CHECKED) { 'WARNING' } else { 'PASS' }
+    $status = if ($script:CaptureRunFinished) { 'State capture finished; see the complete Prepare phase result before backup.' } else { 'State capture did not complete. Do not use this run as migration approval.' }
+    Write-MigrationConsoleSummary -Report ([pscustomobject]@{checks=$items;counts=$counts;overallStatus=$overall}) -Title 'PREPARE / STATE CAPTURE SUMMARY' -ResultLabel 'Capture result' -StatusLines @($status)
+    if ($script:CaptureRunFinished) { Write-Log "Capture files: $StateJsonPath, $StateTextPath, $NetworkJsonPath" ([ConsoleColor]::Cyan) }
+    Write-Log "Capture log: $LogPath" ([ConsoleColor]::Cyan)
+}
 function Write-TextReport {
     $serial = Get-MigrationProperty $script:Capture.systemIdentity 'biosSerialNumber'
     $serialDisplay = if ([string]::IsNullOrWhiteSpace([string]$serial)) { 'Not available; see capture warnings.' } else { [string]$serial }
@@ -601,6 +621,7 @@ try {
         Write-CaptureFiles
     }
     
+    $script:CaptureRunFinished = $disableSucceeded
     Write-Log 'Pre-migration state capture completed.' ([ConsoleColor]::Green)
     Write-Log "Output paths: $StateJsonPath, $StateTextPath, $NetworkJsonPath, $RoutePath, $IpConfigPath, $ArpPath, $LogPath" ([ConsoleColor]::Cyan)
     
@@ -616,6 +637,8 @@ try {
     } catch { }
     exit 99
 } finally {
+    # A display failure must never replace the capture's original exit code.
+    try { Write-CaptureConsoleSummary } catch { Write-Warning "Capture summary could not be displayed: $($_.Exception.Message)" }
     if ($script:TranscriptStarted) { try { Stop-Transcript | Out-Null } catch { } }
     if ($script:LogWriter) { $script:LogWriter.Dispose() }
 }

@@ -93,6 +93,14 @@ folders under `C:\Rutin_migration_yyyy-MM-dd`; a repeat run may add a time suffi
 The console prints the exact paths. Review warnings rather than treating either
 a warning or a successful migration check as full application/DC acceptance.
 
+Each phase prints a final issue list: `READINESS SUMMARY`,
+`PREPARE / STATE CAPTURE SUMMARY`, or `POST-MIGRATION SUMMARY`. All blocking
+issues and warnings/unverified checks are listed with bounded detail previews;
+full details remain in the reports. Capture includes collection-availability
+warnings. An interrupted Prepare is marked `PREPARE STOPPED`. Post-migration
+shows migration status separately from operational evidence and lists manual
+follow-up actions. Missing operational evidence is not reported as healthy.
+
 If execution policy blocks the script, run this in the same PowerShell window
 and then start the menu again. It affects only that session and may still be
 overridden by an organization policy:

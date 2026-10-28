@@ -209,6 +209,10 @@ try {
     else { Write-Warning "$Phase completed with warnings. Review the reports before approving the migration." }
     exit $script:PhaseExitCode
 } catch {
+    if ($Phase -eq 'Prepare') {
+        Write-Host '========== PREPARE STOPPED ==========' -ForegroundColor Red
+        Write-Host 'Preparation did not complete. Review the failure below before backup or migration.' -ForegroundColor Red
+    }
     Write-Host $_.Exception.Message -ForegroundColor Red
     $code = Get-MigrationProperty $_.Exception.Data 'MigrationExitCode' 2
     exit ([int]$code)

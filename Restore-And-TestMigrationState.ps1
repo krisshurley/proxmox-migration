@@ -109,7 +109,7 @@ $ReportHtmlPath = Join-Path $ReportDirectory 'PostMigrationReport.html'
 $ReportTextPath = Join-Path $ReportDirectory 'PostMigrationReport.txt'
 $SchemaVersion = '1.0'
 # Fixed internal build stamp to verify which copy is deployed on a target machine.
-$CodeRevision = '2026-10-26.3'
+$CodeRevision = '2026-10-28.1'
 $script:LogWriter = $null
 $script:Results = New-Object System.Collections.ArrayList
 $script:Actions = New-Object System.Collections.ArrayList
@@ -1460,6 +1460,24 @@ function Test-BoundedMigrationConnectivity {
         Add-Result $row.name $state $row.summary
     }
 }
+function Write-PostMigrationConsoleSummary {
+    param($Summary)
+    $operational = 'Not collected in this run; see report for skipped or failed checks.'
+    $assessmentPath = Get-MigrationProperty $Summary 'operationalAssessmentPath'
+    if ($assessmentPath -and (Test-Path -LiteralPath $assessmentPath -PathType Leaf)) {
+        try {
+            $evidence = Get-Content -LiteralPath $assessmentPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $operational = [string](Get-MigrationProperty $evidence 'operationalStatus' 'NotVerified')
+        } catch { $operational = 'NotVerified (assessment summary could not be read).' }
+    }
+    Write-MigrationConsoleSummary -Report ([pscustomobject]@{checks=@($script:Results);counts=$Summary.counts;overallStatus=$Summary.overallStatus}) -Title 'POST-MIGRATION SUMMARY' -ResultLabel 'Overall result' -StatusLines @(
+        "Migration checks: $($Summary.migrationChecksStatus)",
+        "Operational evidence: $operational"
+    ) -ShowManualActions -ManualActions @($Summary.manualActions)
+    if ($assessmentPath -and (Test-Path -LiteralPath $assessmentPath -PathType Leaf)) {
+        Write-Log ("Operational report: " + (Join-Path (Split-Path -Parent $assessmentPath) 'Report.html')) ([ConsoleColor]::Cyan)
+    }
+}
 function Write-Reports {
     $summary = Get-Summary
     if ($WhatIfPreference) { Write-Log "Preview result: $($summary.overallStatus). No files were written."; return $summary }
@@ -1481,6 +1499,7 @@ function Write-Reports {
     $lines += $(if ($summary.manualActions.Count) { $summary.manualActions } else { '  None' })
     
     $lines | Set-Content -Path $ReportTextPath -Encoding UTF8
+    try { Write-PostMigrationConsoleSummary $summary } catch { Write-Warning "Post-migration summary could not be displayed: $($_.Exception.Message)" }
     Write-Log "Reports: $ReportJsonPath, $ReportHtmlPath, $ReportTextPath" ([ConsoleColor]::Cyan)
     return $summary
 }
