@@ -1,0 +1,202 @@
+{
+  "schemaVersion": "1.0",
+  "bundleSha256": "21a2c7d7607ca52de3d7f57b57c8ba8752b9ba68ca89b54de48ff266091b14e4",
+  "files": [
+    {
+      "path": "drivers/NetKVM/2k16/amd64/Readme.md",
+      "sha256": "b2eae8d3d3b488f14e481cc09e9297c841930fde9d6d0f7b3c5520ec49ada7ed"
+    },
+    {
+      "path": "drivers/NetKVM/2k16/amd64/netkvm.cat",
+      "sha256": "dcb39b33b6dfe83a36a3df774401add68aae095f61bf94578e51c566e634ea75"
+    },
+    {
+      "path": "drivers/NetKVM/2k16/amd64/netkvm.inf",
+      "sha256": "3bdd8ebf54b8deb7b3f92745027b081ad689bd73bf6234336699f3306eb61a67"
+    },
+    {
+      "path": "drivers/NetKVM/2k16/amd64/netkvm.sys",
+      "sha256": "617968babb7379b5d1defa73bc1459a1e8fd7a3a647067cd2595e8549e059f9d"
+    },
+    {
+      "path": "drivers/NetKVM/2k16/amd64/netkvmco.exe",
+      "sha256": "b18c3f9d448d19ffdf0560ff35fd15f136802ca1fb607fe365aa3f1fe5a19c05"
+    },
+    {
+      "path": "drivers/NetKVM/2k16/amd64/netkvmp.exe",
+      "sha256": "d10a59ad43d46ca19805cf4cec256660f7bfa8388e80031815e81ed42b65490d"
+    },
+    {
+      "path": "drivers/NetKVM/2k19/amd64/Readme.md",
+      "sha256": "b2eae8d3d3b488f14e481cc09e9297c841930fde9d6d0f7b3c5520ec49ada7ed"
+    },
+    {
+      "path": "drivers/NetKVM/2k19/amd64/netkvm.cat",
+      "sha256": "dcb39b33b6dfe83a36a3df774401add68aae095f61bf94578e51c566e634ea75"
+    },
+    {
+      "path": "drivers/NetKVM/2k19/amd64/netkvm.inf",
+      "sha256": "3bdd8ebf54b8deb7b3f92745027b081ad689bd73bf6234336699f3306eb61a67"
+    },
+    {
+      "path": "drivers/NetKVM/2k19/amd64/netkvm.sys",
+      "sha256": "617968babb7379b5d1defa73bc1459a1e8fd7a3a647067cd2595e8549e059f9d"
+    },
+    {
+      "path": "drivers/NetKVM/2k19/amd64/netkvmco.exe",
+      "sha256": "b18c3f9d448d19ffdf0560ff35fd15f136802ca1fb607fe365aa3f1fe5a19c05"
+    },
+    {
+      "path": "drivers/NetKVM/2k19/amd64/netkvmp.exe",
+      "sha256": "d10a59ad43d46ca19805cf4cec256660f7bfa8388e80031815e81ed42b65490d"
+    },
+    {
+      "path": "drivers/NetKVM/2k22/amd64/Readme.md",
+      "sha256": "b2eae8d3d3b488f14e481cc09e9297c841930fde9d6d0f7b3c5520ec49ada7ed"
+    },
+    {
+      "path": "drivers/NetKVM/2k22/amd64/netkvm.cat",
+      "sha256": "dcb39b33b6dfe83a36a3df774401add68aae095f61bf94578e51c566e634ea75"
+    },
+    {
+      "path": "drivers/NetKVM/2k22/amd64/netkvm.inf",
+      "sha256": "3bdd8ebf54b8deb7b3f92745027b081ad689bd73bf6234336699f3306eb61a67"
+    },
+    {
+      "path": "drivers/NetKVM/2k22/amd64/netkvm.sys",
+      "sha256": "617968babb7379b5d1defa73bc1459a1e8fd7a3a647067cd2595e8549e059f9d"
+    },
+    {
+      "path": "drivers/NetKVM/2k22/amd64/netkvmco.exe",
+      "sha256": "b18c3f9d448d19ffdf0560ff35fd15f136802ca1fb607fe365aa3f1fe5a19c05"
+    },
+    {
+      "path": "drivers/NetKVM/2k22/amd64/netkvmp.exe",
+      "sha256": "d10a59ad43d46ca19805cf4cec256660f7bfa8388e80031815e81ed42b65490d"
+    },
+    {
+      "path": "drivers/NetKVM/2k25/amd64/Readme.md",
+      "sha256": "b2eae8d3d3b488f14e481cc09e9297c841930fde9d6d0f7b3c5520ec49ada7ed"
+    },
+    {
+      "path": "drivers/NetKVM/2k25/amd64/netkvm.cat",
+      "sha256": "36da1096d0e843a3f49580e316cf813915919cf72caf8295327f93b4413c38f3"
+    },
+    {
+      "path": "drivers/NetKVM/2k25/amd64/netkvm.inf",
+      "sha256": "08c8222af9f6ea5b122d9b444e520f32cc5a2938204b0aa163a461ba1611bc76"
+    },
+    {
+      "path": "drivers/NetKVM/2k25/amd64/netkvm.sys",
+      "sha256": "4053703616626dd8494eb2e015bdc923352241290a008dec2c9f9c1841d44622"
+    },
+    {
+      "path": "drivers/NetKVM/2k25/amd64/netkvmco.exe",
+      "sha256": "1125c5af1e74e7a8ae79db34149476df0aab4aed2dfc00f6acf510e7fa7a8bda"
+    },
+    {
+      "path": "drivers/NetKVM/2k25/amd64/netkvmp.exe",
+      "sha256": "5fa8a05619f6ec65a1d439fe879beea36c8542ec38a17429476904a9b13b4b65"
+    },
+    {
+      "path": "drivers/vioscsi/2k16/amd64/vioscsi.cat",
+      "sha256": "685d756bb0251f8be8fe2a52a64c8c39e86944c2d72295ebb05d9a3ebfba6584"
+    },
+    {
+      "path": "drivers/vioscsi/2k16/amd64/vioscsi.inf",
+      "sha256": "272bb67a4cfacaa00436dd6cc739a6589828367cf52f63d8867d055bcc00e2da"
+    },
+    {
+      "path": "drivers/vioscsi/2k16/amd64/vioscsi.sys",
+      "sha256": "f5b9eb58a6c7e853464b9d2c94f07e9c3956e1643d5aa96350af41f0a6eaa50a"
+    },
+    {
+      "path": "drivers/vioscsi/2k19/amd64/vioscsi.cat",
+      "sha256": "685d756bb0251f8be8fe2a52a64c8c39e86944c2d72295ebb05d9a3ebfba6584"
+    },
+    {
+      "path": "drivers/vioscsi/2k19/amd64/vioscsi.inf",
+      "sha256": "272bb67a4cfacaa00436dd6cc739a6589828367cf52f63d8867d055bcc00e2da"
+    },
+    {
+      "path": "drivers/vioscsi/2k19/amd64/vioscsi.sys",
+      "sha256": "f5b9eb58a6c7e853464b9d2c94f07e9c3956e1643d5aa96350af41f0a6eaa50a"
+    },
+    {
+      "path": "drivers/vioscsi/2k22/amd64/vioscsi.cat",
+      "sha256": "685d756bb0251f8be8fe2a52a64c8c39e86944c2d72295ebb05d9a3ebfba6584"
+    },
+    {
+      "path": "drivers/vioscsi/2k22/amd64/vioscsi.inf",
+      "sha256": "272bb67a4cfacaa00436dd6cc739a6589828367cf52f63d8867d055bcc00e2da"
+    },
+    {
+      "path": "drivers/vioscsi/2k22/amd64/vioscsi.sys",
+      "sha256": "f5b9eb58a6c7e853464b9d2c94f07e9c3956e1643d5aa96350af41f0a6eaa50a"
+    },
+    {
+      "path": "drivers/vioscsi/2k25/amd64/vioscsi.cat",
+      "sha256": "0800faef2e006856f44be692090a54313c526c840b0cde4d6d0f83f2c44eb65e"
+    },
+    {
+      "path": "drivers/vioscsi/2k25/amd64/vioscsi.inf",
+      "sha256": "a5177546d0014e73602556d4b19edc77d434ad509b866d9f56352090542b6390"
+    },
+    {
+      "path": "drivers/vioscsi/2k25/amd64/vioscsi.sys",
+      "sha256": "1460b0ac9491f75e88e4fb6549b2043350fa865329a7d40192f9f685f4aa853a"
+    },
+    {
+      "path": "drivers/vioserial/2k16/amd64/vioser.cat",
+      "sha256": "d6d3a7d4ad8056a44150b01d9e254495f9607341c2c0eb0bf4ef5c569e5477b4"
+    },
+    {
+      "path": "drivers/vioserial/2k16/amd64/vioser.inf",
+      "sha256": "2ab8c4f144103fec8c6fe4d7b620de9b3f7af71f72c16cc486881631eede8945"
+    },
+    {
+      "path": "drivers/vioserial/2k16/amd64/vioser.sys",
+      "sha256": "b839e54ecc43d0fe56014690c64a69a04e343e5cf0bf7f8187c18cfd8ba7aac1"
+    },
+    {
+      "path": "drivers/vioserial/2k19/amd64/vioser.cat",
+      "sha256": "d6d3a7d4ad8056a44150b01d9e254495f9607341c2c0eb0bf4ef5c569e5477b4"
+    },
+    {
+      "path": "drivers/vioserial/2k19/amd64/vioser.inf",
+      "sha256": "2ab8c4f144103fec8c6fe4d7b620de9b3f7af71f72c16cc486881631eede8945"
+    },
+    {
+      "path": "drivers/vioserial/2k19/amd64/vioser.sys",
+      "sha256": "b839e54ecc43d0fe56014690c64a69a04e343e5cf0bf7f8187c18cfd8ba7aac1"
+    },
+    {
+      "path": "drivers/vioserial/2k22/amd64/vioser.cat",
+      "sha256": "d6d3a7d4ad8056a44150b01d9e254495f9607341c2c0eb0bf4ef5c569e5477b4"
+    },
+    {
+      "path": "drivers/vioserial/2k22/amd64/vioser.inf",
+      "sha256": "2ab8c4f144103fec8c6fe4d7b620de9b3f7af71f72c16cc486881631eede8945"
+    },
+    {
+      "path": "drivers/vioserial/2k22/amd64/vioser.sys",
+      "sha256": "b839e54ecc43d0fe56014690c64a69a04e343e5cf0bf7f8187c18cfd8ba7aac1"
+    },
+    {
+      "path": "drivers/vioserial/2k25/amd64/vioser.cat",
+      "sha256": "b5a4c46ec155ecdc3ff3269a80bd521f2fd81d1dabd94e297fe32129257244ee"
+    },
+    {
+      "path": "drivers/vioserial/2k25/amd64/vioser.inf",
+      "sha256": "56f10c4d25672da0536e30f97646de8659ef360b1088de0e9c73bfb92b3c6b30"
+    },
+    {
+      "path": "drivers/vioserial/2k25/amd64/vioser.sys",
+      "sha256": "5f386cfaba8a734020c897be2eb677b7b2c6c1c7f0787b28dfebcfaf0e17d803"
+    },
+    {
+      "path": "qemu-ga-x86_64.msi",
+      "sha256": "22230284dda8ba4c96a834fe1087228a1db5d0b86247a9d7fcb164d279634817"
+    }
+  ]
+}

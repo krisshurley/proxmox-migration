@@ -1,0 +1,851 @@
+# VMware-to-Proxmox Migration Toolkit
+
+> **Alternative workflow branch: `codex/direct-esxi-import`.** Use `main` for the
+> established Veeam/Firstboot workflow. This branch adds direct Proxmox ESXi import
+> for continued testing. Prepare has completed on the Windows Server 2019 test VM;
+> the complete import and post-migration validation still need verification.
+
+For the Swedish operator walkthrough, start with [Användarguide](ANVANDARGUIDE.md).
+For Windows Notepad, open [ANVANDARGUIDE.txt](ANVANDARGUIDE.txt) in the same folder.
+The text version includes the complete guide, uses UTF-8 with BOM and Windows
+line endings, and requires no Markdown viewer or PDF reader.
+This README describes the menu workflow first, followed by the technical reference
+and advanced shortcuts.
+
+When editing the guide, update `ANVANDARGUIDE.md` and regenerate the text mirror
+from the repository root with `python3 tools/export_user_guide.py`. Verify it with
+`python3 tools/export_user_guide.py --check`. Python is needed only to regenerate
+the guide during development, not to read it on the Windows server.
+
+PowerShell scripts for capturing Windows Server state before a Veeam restore or
+direct Proxmox ESXi import, restoring IPv4 settings, and validating the migrated
+server.
+Code and user-facing script messages are in English. The Swedish review and
+implementation notes are in `GRANSKNING.md`.
+
+Target environment: elevated Windows PowerShell 5.1 on Windows Server
+2016, 2019, 2022 or 2025. Platform operations still require validation on the
+actual Windows/Veeam/Proxmox combination; the portable test suite uses mocks.
+Copy all files from the repository root, including `Migration.Common.ps1`
+and `virtio-win-guest-tools.exe`, and include the **`direct-import` subfolder**
+when using direct ESXi import. The migration scripts and installer must remain
+in the same folder. The `tests` and `tools` directories are for development only.
+
+## Default Veeam workflow and ownership
+
+1. **ReadinessCheck on VMware:** read-only health checks and local reports.
+2. **Prepare on VMware:** source driver preparation (default) and state capture.
+   Original VMware Tools service state is saved, then the source services are
+   stopped/disabled (the original workflow). No source Tools uninstall is performed.
+3. **Final backup and Veeam restore:** use the restore method verified for your
+   environment, with boot-critical storage drivers available at first boot.
+4. **Wait for Guestfs/Firstboot to finish on Proxmox.** It may install drivers,
+   install QEMU Guest Agent/Balloon, uninstall VMware Tools, online disks and restart
+   Windows several times. Reaching the login screen does not mean it has finished.
+5. **ValidatePost on Proxmox:** verify Firstboot completion, restore captured IPv4
+   configurations to their mapped adapters, uninstall remaining VMware Tools through
+   MSI on verified VirtIO targets, and run post-migration checks. It does not install
+   agents or restart Windows.
+
+The observed Firstboot sequence runs six scripts with six restart requests. This
+is consistent with documented conversion behavior, not evidence of a crash loop.
+See [virt-v2v release notes](https://libguestfs.org/virt-v2v-release-notes-2.6.1.html)
+and [Firstboot behavior](https://www.libguestfs.org/virt-customize.1.html#firstboot).
+These scripts do not modify Firstboot's injected scripts or reboot policy.
+
+## Quick start
+
+Use the menu for normal migrations. Open **Windows PowerShell as Administrator**,
+change to the folder containing the scripts, and run:
+
+```powershell
+.\Migrate-VmwareToProxmox.ps1
+```
+
+The menu is:
+
+```text
+1) ReadinessCheck  2) Prepare  3) ValidatePost  4) Exit
+```
+
+Run the script again each time you want to select the next phase:
+
+Step 1 asks for the migration method. Press Enter for the existing
+`Veeam / Firstboot` workflow, or choose `Proxmox ESXi import`. Step 2 automatically
+reuses the latest recorded choice for this computer, including when invoked with
+`-Phase Prepare`. Step 3 reads the method from the selected capture.
+
+If no method has been recorded, interactive step 2 asks once; the command-line
+shortcut defaults to Veeam. A saved method survives the 24-hour evidence expiry;
+Prepare still refreshes expired before evidence. To start a new migration with a
+different method, rerun step 1 and select it, or explicitly supply
+`-MigrationMethod VeeamFirstboot` / `-MigrationMethod DirectImport` to Prepare.
+The existing preparation confirmation remains in place.
+
+1. **On the original VMware VM, choose 1.** Select `1) Migration checks` for the
+   normal workflow, or `2) Deep checks for this server` when additional diagnostics
+   are needed. Review the results. A missing storage driver at this point produces
+   a warning directing you to step 2; it does not approve the VM for migration.
+2. **On the original VMware VM, choose 2.** Confirm preparation. It installs and
+   verifies the storage driver, exports migration state, and stops/disables VMware
+   Tools services after saving their original state. Driver verification failures
+   stop preparation. Keep the printed `StateDirectory` and include the complete
+   export and before evidence in the backup. You do not need to rerun step 1 after
+   successful preparation. Complete any explicitly required reboot before backup.
+3. **Take the final backup and restore to Proxmox.** For a production cutover, keep
+   the original VM off before connecting the restored copy to the production network.
+   Wait for Guestfs/Firstboot and its automatic restarts to finish.
+4. **On the restored Proxmox VM, choose 3.** It uses the captured check level,
+   restores networking, handles remaining VMware Tools, and validates the result.
+   Do not select step 1 on the restored VM as an after-check; it creates new before
+   evidence.
+5. **Review the latest run's HTML reports:**
+   - `Restore-And-TestMigrationState*\Reports\PostMigrationReport.html` for migration
+     actions, failures and follow-up work.
+   - `Restore-And-TestMigrationState*\Assessment\Report.html` for before/after
+     operational evidence and items that could not be verified.
+   - With Deep on a DC, also review
+     `Assessment\<timestamp>_PostMigration\FullReport.html` inside that restore run.
+
+The normal order is **1 → 2 → backup/restore → 3**. Reports are created in unique
+folders under `C:\VM_migration_yyyy-MM-dd`; a repeat run may add a time suffix.
+The console prints the exact paths. Review warnings rather than treating either
+a warning or a successful migration check as full application/DC acceptance.
+
+Existing exports and saved method choices under earlier `*_migration_*` directory
+prefixes remain discoverable. Their folders are not renamed or moved. Discovery
+uses computer identity and capture metadata; the new name does not change the
+network settings or other server configuration stored in the export.
+
+Each phase prints a final issue list: `READINESS SUMMARY`,
+`PREPARE / STATE CAPTURE SUMMARY`, or `POST-MIGRATION SUMMARY`. All blocking
+issues and warnings/unverified checks are listed with bounded detail previews;
+full details remain in the reports. Capture includes collection-availability
+warnings. An interrupted Prepare is marked `PREPARE STOPPED`. Post-migration
+shows migration status separately from operational evidence and lists manual
+follow-up actions. Missing operational evidence is not reported as healthy.
+
+If execution policy blocks the script, run this in the same PowerShell window
+and then start the menu again. It affects only that session and may still be
+overridden by an organization policy:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+Absolute script paths also work; offline files are resolved relative to the script
+directory by default. Server role is detected from Windows.
+`-ServerType DomainController` or `Normal` may be supplied as an assertion and
+must agree with the detected role. Administrator membership is checked; it does
+not prove that an account is local or that domain login will work without a network.
+Plan console access and appropriate recovery credentials before migration.
+
+### Direct Proxmox ESXi import
+
+Use the same menu, choosing **2) Proxmox ESXi import** at the migration-method
+prompt in source step 1. Step 2 reuses this choice automatically; if step 1 was
+skipped and no choice exists, select the method in step 2. This is separate from the phase number and check
+level. `VeeamFirstboot` remains the default; existing captures without a method
+also use that default.
+
+Direct preparation stages any missing **vioscsi**, **NetKVM** and **VirtIO Serial**
+packages for the source Windows version before initializing SCSI, and verifies
+**QEMU Guest Agent** installation and automatic startup. Missing packages are
+provided in the **`direct-import` subfolder**, exported byte-for-byte from the
+reviewed installer. The script verifies the pinned manifest, all payload hashes,
+and the matching installer hash before using them. No separate ISO or driver
+download is needed. Installer logs remain under `mig_prep*`. The agent need
+not be running on VMware. Any installation/verification failure stops preparation
+before export and VMware Tools service shutdown. `FirstbootManaged` is not
+supported with this method.
+
+Burn `/layout` copies only the bundle for this build; it does not extract its
+embedded MSIs. Direct import therefore uses prepared offline files and does not
+depend on the machine's installer cache or an administrative MSI image. Do not
+delete or replace individual files in `direct-import`.
+
+Developers can reproduce and verify these vendor payloads using only Python:
+
+```sh
+python3 tools/export_direct_import_payloads.py
+python3 tools/export_direct_import_payloads.py --check
+```
+
+The exporter accepts only the pinned bundle and never runs an installer. Payloads
+remain unchanged vendor binaries; the driver INF/CAT/SYS sets and related files
+are kept together for each supported Windows version. Runtime Python is not needed.
+
+Direct import requires pre-staged packages through `-VerifyPublishedPackage`.
+Veeam retains its installer and registry/DriverDatabase source discovery. Before
+device changes, its cached OEM number is reconciled against the actual storage
+package: an old `oem*.inf` number can belong to another driver after a restore.
+If no published `vioscsi.inf` package exists after the guest-tools installer,
+Veeam registers only the matching bundled SCSI package and re-enumerates Driver
+Store before initialization. This also handles missing files behind stale registry
+paths. Recovery supports x64 Windows Server 2016/2019/2022/2025 and verifies the
+manifest, installer and selected INF/CAT/SYS hashes. Keep the `direct-import`
+folder with the scripts: only its SCSI subset is used for Veeam recovery, with no
+network/agent setup or Firstboot changes. Healthy Veeam preparations do not need
+the recovery payloads. The standalone initializer can also register its original
+storage INF when available. Missing/altered recovery files, unsupported recovery
+builds, failed registration, ambiguous packages or absence
+of a published package after registration block preparation. Existing binding,
+binary and boot checks remain enabled; a running driver alone is not proof of
+a valid package. No cached OEM number is accepted solely to bypass a failure.
+
+After successful preparation and any required planned reboot:
+
+1. Shut down the source VM and keep it off during cutover.
+2. Import it through Proxmox's ESXi importer. Preserve the MAC addresses and map
+   every NIC to its intended bridge/VLAN. Use VirtIO NICs and the prepared storage
+   controller; review firmware and boot order.
+3. Enable **Options > QEMU Guest Agent** in Proxmox **before starting the VM**.
+4. Start Windows and run menu step **3**. The captured `DirectImport` method
+   automatically declares that Firstboot was not used, restores networking and
+   handles remaining VMware Tools. It starts the installed QEMU Guest Agent on
+   the verified target, checks driver packages and requires a running agent.
+
+A pending/unknown Firstboot still blocks step 3. Guest drivers, agents, routes and
+services are not changed by this feature when the Veeam method is selected. The
+agent's running state alone does not prove host communication; verify that Proxmox
+can retrieve guest information. This new installation path needs an isolated
+Windows import rehearsal before production use; portable tests mock native APIs.
+
+Explicit shortcuts for direct import:
+
+```powershell
+.\Migrate-VmwareToProxmox.ps1 -Phase ReadinessCheck -MigrationMethod DirectImport
+.\Migrate-VmwareToProxmox.ps1 -Phase Prepare -MigrationMethod DirectImport
+# On Proxmox, the method is read from the selected captured state:
+.\Migrate-VmwareToProxmox.ps1 -Phase ValidatePost
+```
+
+Copy the complete capture including `State\MigrationAssessment`. Step 3 rejects
+an explicit method that differs from the capture. Older direct-import experiments
+without a recorded method can still use the existing `-FirstbootNotUsed` override;
+they do not acquire the new source preparation by rerunning step 3.
+
+### Advanced shortcuts: select a phase directly
+
+`-Phase` skips the phase menu and runs the selected phase with the same safeguards.
+Run each command at the corresponding point in the workflow; these are not three
+commands to run consecutively on the same VM.
+
+```powershell
+# Original VMware VM: equivalent to menu option 1 (normal Migration checks).
+.\Migrate-VmwareToProxmox.ps1 -Phase ReadinessCheck
+
+# Original VMware VM: equivalent to menu option 2; still asks for confirmation.
+.\Migrate-VmwareToProxmox.ps1 -Phase Prepare
+
+# Restored Proxmox VM: equivalent to menu option 3, after Firstboot finishes.
+.\Migrate-VmwareToProxmox.ps1 -Phase ValidatePost
+```
+
+To select Deep directly, use `-Phase ReadinessCheck -CheckLevel Deep` at the start.
+Prepare and ValidatePost reuse the saved level. Do not change profiles midway
+through a migration. To select a particular export, pass `-StateDirectory` as shown
+below. Extra parameters can also be used with the menu; for example,
+`-AdapterMappingPath` supplies an explicit NIC mapping without selecting a phase.
+
+### Automatic server-role detection and DC checks
+
+The former Normal/DC prompt is replaced by automatic detection on each run.
+The main script reads `Win32_ComputerSystem.DomainRole`: values 4 or 5 identify
+a `DomainController`; other values identify `Normal`. A domain-joined member
+server is therefore `Normal`. The detected role is printed beside the phase.
+An explicit `-ServerType` asserts the expected role; a mismatch stops execution
+and cannot be used to bypass DC checks.
+
+The menu now defaults to `-CheckLevel Migration`. Step 1 offers Migration or
+Deep; noninteractive use defaults to Migration. Step 2 preserves the choice and
+a recent (<24 h) before snapshot with the exact exported State folder, or collects
+fresh evidence before preparation when necessary. Step 3 reads the saved level.
+A conflicting explicit level is rejected rather than comparing different profiles.
+
+Migration checks one local server: source/target identity and NIC safeguards,
+network/routes, real storage health, local service state and (on DCs) local
+SYSVOL/NETLOGON paths and local incoming replication metadata per partner/partition.
+It does not enumerate the domain, force replication, run DCDiag or test external
+DNS forwarders. Deep adds local DC diagnostics and extended connectivity/VSS.
+`Test-MigrationReadiness.ps1` also accepts `-CheckLevel`; its default is Migration.
+
+`Test-MigrationAssessment.ps1` collects last-24-hour local EVTX exports (all levels)
+and structured before/after evidence. Per-log event comparisons are capped at 500
+warnings/errors; a capped or unreadable window is explicitly unverified. This is
+not event-log redaction: store raw exports with the same protection as server
+backups. No logs are cleared or AD/DNS settings repaired.
+
+Every local probe normally has a 20 s process-job limit; native repadmin/wevtutil
+calls have a 12 s limit. Only diagnostic processes launched by the collector may
+be terminated. The Deep DC child is limited to 300 s. Durations and missing data
+are recorded; timeouts never imply a healthy result. These limits do not wrap
+network mutations, Tools uninstall, driver installation or an explicit DeepScan.
+
+Diagnostics use an owned `System.Diagnostics.Process` with concurrent asynchronous
+stdout/stderr reads. The exit code is read while the process handle is still owned;
+an unavailable exit code remains unverified. Failed probe reports preserve child-job
+error reasons instead of describing every failure as a timeout.
+
+Per-user service instances remain in snapshots but are excluded from server-service
+regression checks. New captures include numeric ServiceType and isPerUserInstance;
+older captures use a restricted list of known Windows template names plus a LUID
+suffix. Arbitrary hexadecimal suffixes do not exempt normal server services. Service
+comparison never changes a service configuration or state.
+
+Reports are separate: `Reports/PostMigrationReport.*` describes migration checks
+and actions (`summary.migrationChecksStatus`), while `Assessment/Report.*`,
+`Comparison.json` and `AssessmentSummary.json` describe operational drift.
+Classifications are ExistingDeviation, NewDeviation, Recovered, NotVerified,
+NewEvent and RecurringEvent. Repeated message signatures do not prove identical
+causes; new events remain review items. Copied events require continuous log
+identity/record sequence. Missing replication rows or unchanged last-success
+values never imply recovery. Structured replication CSV currently requires
+recognizable English column names; otherwise raw output is retained as unverified.
+
+Baseline/level are stored at `State/MigrationAssessment/Selection.json` with hashes
+of `PreMigrationState.json` and `Before/Snapshot.json`. Before evidence must have
+the same computer, stage, level and schema. Legacy State folders without a manifest
+still work with Migration; their operational comparison is explicitly unverified.
+`-WhatIf` does not create evidence or invoke diagnostic children in preparation/
+post-migration. Existing prerequisite/identity/rollback failures still stop changes.
+Existing DC deviations and Deep diagnostic failures produce review warnings, not
+an instruction to repair AD before moving the VM.
+
+For domain-wide diagnostics, explicitly run the standalone
+`Test-DCMigrationHealth.ps1`. Without `-ComputerName` it still discovers all writable
+DCs. With an explicit server list it skips the domain-wide `/replsummary` sweep.
+The menu's Deep profile always passes the local computer explicitly. Deep requires
+RSAT/ActiveDirectory; the local standard collector does not.
+
+The workflow remains three phases: **1) ReadinessCheck**, **2) Prepare** and
+**3) ValidatePost**, followed by **4) Exit**. Prepare already calls the exporter;
+there is no separate export menu step. It captures every active NIC and its routes.
+Multiple NICs produce a preparation warning (main exit code 1) rather than a failed
+capture. ValidatePost resolves every source-to-target NIC mapping before making
+changes. Preserve source MACs in Proxmox, or provide an explicit mapping as below.
+
+Prepare prints the capture's `StateDirectory`. Record this path for the restore.
+It is preferable to supply it explicitly:
+
+```powershell
+# On the restored Proxmox VM, after Firstboot has finished:
+.\Migrate-VmwareToProxmox.ps1 -Phase ValidatePost `
+    -StateDirectory 'C:\VM_migration_2026-10-22\Export-MigrationState\State'
+```
+
+If omitted, the latest matching capture is selected by its captured UTC timestamp
+across `C:\*_migration_*` directories, including earlier prefixes, and export suffixes. Missing files,
+ambiguous timestamps or unreadable captures require an explicit selection rather
+than silently falling back to an older baseline. Computer identity and schema are
+checked before restoration. Logs/reports use a new directory for each run.
+
+## Source driver preparation
+
+`-DriverPreparation Install` is the default and preserves source-side VirtIO SCSI
+preparation. The offline EXE and reviewed initialization script must be present.
+Menu step 1 uses `StorageDriverMode BeforePrepare`: a missing vioscsi driver warns
+that step 2 must prepare it. Prepare must verify the driver successfully before
+export and source service changes. Standalone `Test-MigrationReadiness.ps1` keeps
+the stricter `StorageDriverMode Installed` default, which fails if the required
+driver is missing; it supports `-RequiredStorageDriver viostor` for a verified
+VirtIO Block target.
+A driver installation or binding failure stops Prepare. Reboot-required status
+3010 is reported as a warning; review readiness and complete a planned reboot if
+required before taking the final migration backup. If settings change afterward,
+run capture again and use the new directory. Main-script Prepare stops/disables
+VMware Tools services after capture by default. The standalone exporter remains
+read-only unless its service-disable option is supplied.
+
+When a tested restore method provides boot-critical drivers, preparation can be
+explicitly delegated to it:
+
+```powershell
+.\Migrate-VmwareToProxmox.ps1 -Phase ReadinessCheck -DriverPreparation FirstbootManaged
+.\Migrate-VmwareToProxmox.ps1 -Phase Prepare -DriverPreparation FirstbootManaged
+```
+
+This records a warning, skips source driver installation and still captures state.
+It does not verify Veeam's driver injection or guarantee first boot. Check the exact
+Veeam/plugin version, restore type and target controller before choosing it.
+
+Manual driver setup:
+
+```powershell
+.\mig_prep.ps1
+.\mig_prep.ps1 -Mode offline -InstallerSourcePath 'D:\virtio-win-guest-tools.exe' `
+    -InitScriptSourcePath 'D:\load-virtio-scsi-on-boot.ps1' -KeepArtifacts
+.\mig_prep.ps1 -Mode online
+```
+
+Online mode downloads only the installer and uses the reviewed local initialization
+script. `WorkingDirectory`, `StatusPath` and `LogPath` overrides are honored.
+Staging over the original source files is rejected, so cleanup cannot delete them.
+The installer must have either a valid Authenticode signature or the exact
+SHA-256 of the reviewed bundled artifact described below. Other unsigned files
+require **both** `-AllowUnsignedInstaller` and an independently trusted
+`-ExpectedInstallerSha256`. Explicit expected-hash mismatches and invalid signatures
+remain blocked, including for the bundled artifact.
+
+The bundled `virtio-win-guest-tools.exe` version 0.1.271.0 has no embedded
+Authenticode signature. On 2026-10-22, it was compared byte-for-byte with a fresh
+download from the
+[VirtIO project's archive for 0.1.271-1](https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.271-1/virtio-win-guest-tools.exe).
+Both files had SHA-256
+`21a2c7d7607ca52de3d7f57b57c8ba8752b9ba68ca89b54de48ff266091b14e4`.
+This exact hash is allowed in `Migration.Common.ps1`, so running the main script
+normally and selecting **2) Prepare** needs no extra installer authorization flags.
+Renaming another file to the same name does not authorize it. A future replacement
+must be reviewed before updating this pinned hash. The comparison establishes
+equality with the published artifact, not the installer's behavior.
+
+The boot initialization helper verifies native driver-binding exit codes and
+boot-start settings before reporting success.
+[PnPUtil exit code 259](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/pnputil-return-values)
+means no device matched or a better/newer driver is already installed; it is not
+unconditionally treated as a binding failure. For 259, the helper verifies the
+published OEM package and original INF name through `Get-WindowsDriver -Online`,
+the driver binary, boot-start service configuration and StartOverride before
+continuing with a warning. A missing package/binary, failed query, unsafe boot
+settings or any other unsupported exit code still blocks preparation. This checks
+source preparation; actual VirtIO hardware binding must be checked after restore. It preserves the existing phantom
+device technique. Its Windows SetupAPI/registry behavior must be tested on each
+supported Windows release. The bundle does not provide automatic source rollback.
+
+## Firstboot gate
+
+Both the main script and standalone restore script check Firstboot before network
+or disk changes, validation, or explicit Tools repair. They inspect the Firstboot
+service, pending scripts and a completion marker or the final successful service
+uninstall entry in `C:\Program Files\Guestfs\Firstboot\log.txt`.
+
+A pending script or active Firstboot runner blocks the run even if a stale completion
+marker exists. Installer `.log` files such as `scripts\balloon.log` are excluded
+from pending work and reported as `ignoredLogFiles` in the shared status helper.
+Other unrecognized non-log files remain blocking. Known installed Balloon/QEMU
+Agent executables (`blnsvr.exe`, `qemu-ga.exe`) under this directory are reported
+as `installedPayloadServices` and do not count as the conversion runner. A
+Firstboot-named service or unrecognized service executable remains blocking,
+including a stopped runner. Matching only a payload filename in another program's
+arguments cannot authorize continuation. Blocked runs display service identity,
+state/start mode/path, pending scripts, marker status and the last Firstboot log
+line directly in the normal menu output; no separate diagnostic command is needed. Ignoring a log does not itself
+establish completion. Normally the service must be absent and completion evidence
+present. An existing directory without verifiable completion also blocks.
+Investigate pending/failing conversion rather than running a competing repair.
+Completion only establishes that conversion finished; the normal health checks
+still need to pass.
+
+There is one read-only exception for the legacy `rhsrvany.exe -s firstboot`
+wrapper. Its source waits for a stop event even after the batch process exits;
+successful service uninstall only marks its registration for deletion. This can
+leave it Running and Disabled until shutdown, without any conversion work left.
+The gate accepts this state without another reboot only if exactly the known
+firstboot service remains, its executable/PID match, its queue is inspectable and
+empty, and the final uninstall-success log entry was written in the current boot.
+It also requires no runner children, detached commands referencing Firstboot,
+active/unverified msiexec or enabled Firstboot scheduled tasks. Process/task inventories
+must succeed. The queue, log fingerprint and runner identity are checked again
+after two seconds. An unchanged idle wrapper is accepted as Complete with
+`completionEvidence: VerifiedIdleUninstalledRunner`. No service/process is stopped
+or deleted and no completion marker is written. Unknown wrappers, stale logs,
+changing evidence and outstanding work remain blocked. This proves the runner is
+idle; it does not certify success of each injected installer.
+
+The Windows Installer service can remain alive after our MSI attempt exits. A
+msiexec process is excluded from outstanding work only when its executable is the
+system msiexec, its command is `/V`, native SCM status identifies that exact PID
+as the running msiserver, and Global\_MSIExecute is absent or immediately acquirable.
+The observed service retains SERVICE_ACCEPT_SHUTDOWN after its failed custom
+action even when the execution mutex no longer exists, so that flag is not used
+alone. The mutex check only establishes that no MSI execute sequence owns that
+lock; MSI clients and other Firstboot work are checked separately. A held or
+inaccessible mutex, MSI clients, unknown identity or unavailable SCM status block.
+No installer process is stopped or killed. Blocking
+messages include PID, parent, name and command line to identify the actual work.
+This uses Microsoft's documented [Windows Installer activity status](https://learn.microsoft.com/en-us/windows/win32/msi/-msiexecute-mutex).
+
+References: [Guestfs batch completion](https://github.com/libguestfs/libguestfs-common/blob/master/mlcustomize/firstboot.ml)
+and [rhsrvany uninstall and service loop](https://github.com/rwmjones/rhsrvany/blob/master/RHSrvAny/RHSrvAny.c).
+
+For a restore method that does **not** use Guestfs/Firstboot:
+
+```powershell
+.\Migrate-VmwareToProxmox.ps1 -Phase ValidatePost -FirstbootNotUsed `
+    -StateDirectory 'C:\VM_migration_2026-10-22\Export-MigrationState\State'
+```
+
+This explicit declaration only allows the absence of Firstboot evidence. It cannot
+bypass a detected pending or unknown Firstboot conversion.
+
+## Network restoration and rollback
+
+Every captured source NIC must map to a unique target NIC before any network
+settings change. With preserved MAC addresses, mapping is automatic, including
+multiple adapters and a secondary adapter without a default gateway. Adapter
+names, interface indexes and enumeration order may change; they are not evidence
+of correspondence. A uniquely identified disabled target can be enabled. The
+existing one-source/one-target VirtIO fallback remains available when its MAC changed.
+Additional unmapped target adapters are left unchanged.
+
+If target MACs differ, create `AdapterMapping.json` with **one entry for every
+captured source NIC**. Replace the example MACs and computer name with the actual
+values. Source MACs come from `NetworkConfiguration.json`; target MACs come from
+`Get-NetAdapter | Format-Table Name, InterfaceIndex, MacAddress, Status` on Proxmox.
+The optional `computerName` must match the captured computer when specified.
+
+```json
+{
+  "schemaVersion": "1.0",
+  "computerName": "REPLACE_WITH_CAPTURED_COMPUTER_NAME",
+  "mappings": [
+    { "sourceMacAddress": "00-50-56-00-00-01", "targetMacAddress": "02-00-00-00-00-01" },
+    { "sourceMacAddress": "00-50-56-00-00-02", "targetMacAddress": "02-00-00-00-00-02" }
+  ]
+}
+```
+
+Pass this file to the main script and choose **3) ValidatePost** in the same menu:
+
+```powershell
+.\Migrate-VmwareToProxmox.ps1 -AdapterMappingPath '.\AdapterMapping.json'
+```
+
+It also works with `-Phase ValidatePost`, or directly with the restore script.
+To inspect the mapping without changing settings, after Firstboot has finished:
+
+```powershell
+.\Restore-And-TestMigrationState.ps1 -Mode ApplyNetwork -WhatIf `
+    -StateDirectory '<captured State directory>' -AdapterMappingPath '.\AdapterMapping.json'
+```
+
+Missing, duplicate or incomplete mappings block restoration of **all** NICs;
+there is no partial approval. MAC addresses accept hyphens, colons or no separators.
+The script verifies target identity again before changes and rollback. Verify that
+each target NIC is connected to the intended Proxmox bridge/VLAN; a Windows MAC
+mapping cannot identify the external network wiring.
+
+For every mapped adapter, restoration covers DHCP/static IPv4 mode, addresses and
+prefix lengths, DNS assignment/servers/suffix/registration, interface metric,
+default gateways and static routes. A route follows its captured **source interface**
+to that interface's mapped target; a static route over the second NIC does not
+require that NIC to have a default gateway. On-link routes and other next hops are
+supported. Active-only routes remain active-only; persistent routes survive restart.
+Windows Server 2019 may return null/65535 Protocol for PersistentStore records.
+When persistence is established by that explicit store query, these saved routes
+are classified as static even without an active counterpart. `protocolSource`
+records whether classification came from Protocol or PersistentStore; unknown
+active-only routes remain blocking. The same rule applies to target snapshots.
+Static routes outside the captured active source interfaces are retained for
+reference and produce a warning; they are never assigned to a different NIC.
+Existing IP addresses with incorrect prefixes are corrected. Link/address readiness
+has a bounded wait, and duplicate addresses cause failure.
+
+Before the first write, **all** mapped targets' network settings and routes are saved
+to `Restore-And-TestMigrationState*/PreNetworkChangeRollback.json` (rollback schema
+1.1, `adapters` array). If any NIC or route restoration throws, every attempted target
+is rolled back in reverse order, including the partially configured failing NIC.
+Rollback of the remaining NICs is attempted even if one rollback fails. Failures
+are reported distinctly. The previous single-adapter rollback format remains readable.
+This snapshot restores the pre-change **target** configuration, not the VMware VM.
+DHCP leases remain server-controlled. Keep console access during network changes.
+
+Old exports with `protocol: Unknown` or missing static-route persistence are blocked
+for automatic restoration. Recapture with the fixed exporter, or configure the
+network manually and use ValidateOnly/CompareOnly to review the legacy baseline.
+
+ValidateOnly/CompareOnly can also check a manually configured migration. Explicit
+mapping is used for comparisons when supplied; otherwise validation attempts a
+unique MAC/IP match. Ambiguous matches require review. IPv6, VLAN configuration,
+NIC teaming, network profiles and firewall policy are not automatically restored.
+Exported data is for reference; validate these separately when used by the source VM.
+
+There is no hard-coded two-NIC or route-count limit. A portable regression covers
+eight NICs and 800 static IPv4 routes, including repeated destination prefixes on
+different interfaces, multiple next hops, on-link routes, metrics, persistence and
+changed MACs. Windows calls are mocked in this test; it does not measure real
+Windows execution time or certify a large migration. Route operations can take
+longer with larger tables.
+
+The source capture includes active NICs. Disabled/disconnected source NICs and
+routes belonging to uncaptured interfaces require separate review. Static IPv4
+route restoration does not migrate dynamic-routing software/configuration or IPv6.
+
+## Restore modes and optional repairs
+
+| Mode | Behavior |
+|---|---|
+| `ValidateOnly` (standalone default) | Read-only guest checks and local reports |
+| `CompareOnly` | Read-only comparisons/checks and local reports |
+| `ApplyNetwork` | Restore the mapped IPv4 configuration and validate |
+| `Full` (main ValidatePost) | Restore IPv4, uninstall remaining VMware Tools through MSI on verified VirtIO targets, then run all checks |
+| `VmwareUninstall` | Explicit MSI-only Tools repair after the Firstboot gate; no automatic network restore |
+
+Validation includes identity, IP/prefix/DNS/routes, disk inventory/health and drive
+letters, previously running automatic services, roles, shares, tasks, listening
+ports, filesystem dirty bits, relevant events, DNS/DC discovery, optional TCP
+application ports, QEMU Guest Agent and VSS writers. Unavailable or unrecognized
+checks produce warnings/NOT_CHECKED, not a successful check. English-dependent
+native output parsing may require manual review on localized Windows installs.
+Gateway ICMP failure is a warning, as ICMP may be filtered. Member-server DC
+discovery does not require the ActiveDirectory PowerShell module.
+
+Optional switches, also accepted by the main ValidatePost phase:
+
+- `-RepairOfflineDisks`: explicitly allow offline-disk repair; default is inspect
+  and report. Review all attached disks first. Repair may clear read-only state.
+- `-RemoveHiddenVMwareAdapters`: explicitly request removal of confidently
+  identified non-present VMware NICs; otherwise leave them alone. If the removal
+  cmdlet is unavailable, instructions are reported for manual handling.
+- `-DeepScan`: enable online `chkdsk /scan` in Full/ApplyNetwork. It can perform
+  online repairs, so it is protected by ShouldProcess and is skipped in read-only
+  modes and WhatIf.
+- `-DnsTestHost 'dc01.example.test'`: DNS/connectivity target; recommended for a
+  workgroup server. No public DNS target is assumed.
+- `-ApplicationConfigPath '<file.json>'`: optional `{ "tcpPorts": [443, 8443] }`
+  tested against DnsTestHost, or the joined domain if DnsTestHost is omitted.
+- `-MigrationTimestamp '2026-10-22T10:00:00'`: event-log starting point. Default is
+  the last Windows boot; supply the conversion start to include earlier boots.
+
+All guest changes in the restore script support `-WhatIf`/`-Confirm`. WhatIf writes
+no restore logs, reports or rollback files, and starts no modifying native commands.
+Checks still read the current configuration and may report differences because
+previewed changes have not been applied.
+
+```powershell
+.\Migrate-VmwareToProxmox.ps1 -Phase ValidatePost -StateDirectory '<State directory>' -WhatIf
+.\Restore-And-TestMigrationState.ps1 -Mode Full -StateDirectory '<State directory>' -WhatIf
+```
+
+After Firstboot completes, normal menu step 3 (`Full`) automatically attempts MSI
+uninstall if VMware Tools remains. This happens after network restoration and
+before collecting the post-state and validating services/ports. The captured
+computer name must match exactly (even with Force), all mapped target NICs must
+be verified VirtIO devices, and their identities and Firstboot are checked again.
+ApplyNetwork, ValidateOnly and CompareOnly do not uninstall Tools. The source
+Prepare phase continues to disable services without uninstalling the product.
+
+Separate MSI repair is also available when appropriate:
+
+```powershell
+.\Restore-And-TestMigrationState.ps1 -Mode VmwareUninstall -WhatIf
+.\Restore-And-TestMigrationState.ps1 -Mode VmwareUninstall -Confirm
+```
+
+Both paths use MSI with `/norestart`, never Win32_Product inventory or deletion
+of product-registration keys. The standalone VmwareUninstall mode stays MSI-only.
+Reboot-required status is a warning and needs a planned
+restart followed by verification. Both uninstall paths check product registration
+and all four services: VMTools, VGAuthService, VMVss and VM3DService. Remaining
+services cannot produce a clean removal result, even if VMTools itself is gone.
+Missing/ambiguous MSI registration requires manual repair; the report contains
+follow-up actions and the installer log path. The standalone VmwareUninstall mode
+is an explicit repair, not a full migration health approval.
+
+Normal Full mode has a service-remnant fallback specifically for MSI exits 1603
+and 1605. It rechecks Firstboot and the verified target, then inventories only
+VMTools, VGAuthService, VMVss and VM3DService. Each executable must match its known
+Tools filename and installation location under Program Files/VMware/VMware Tools
+(including the VGAuth subdirectory and supported 32-bit location). All service
+registry keys and service state/path metadata are backed up in a unique
+`VMwareToolsServiceBackup-<id>` folder before the first service stop/deletion.
+Each service identity is checked again before stopping it and using `sc.exe delete`.
+The fallback acquires Global\_MSIExecute exclusively before any backup/mutation,
+checks again for MSI clients and Firstboot work, and holds the execution lock
+until cleanup exits. A busy lock prevents cleanup. Every exit path releases it,
+including failed backups and service errors. This serializes service-remnant
+cleanup against MSI execute sequences; it is not an MSI package uninstall.
+Unknown binaries, failed backups or failure to stop prevent deletion. Exit 1072
+means pending deletion, not verified absence; the report checks remaining services.
+WhatIf performs no backup/stop/deletion. Other MSI failures, such as a busy
+installer (1618), do not trigger fallback. Missing/ambiguous MSI registration still
+requires manual repair. The fallback preserves MSI registration, files and drivers
+and reports WARNING/manual follow-up, never a successful complete package removal.
+
+Storage health reports include controller instance IDs, status, problem codes and
+hardware IDs. Known preparation devices must match the exact `ROOT\VIOSCSI` or
+`ROOT\VIOSTOR` family, a VirtIO name and the corresponding hardware ID created by
+the helper. They produce a separate warning. PCI controllers, unknown ROOT devices
+and unverifiable identities remain subject to the normal health checks. No device
+or driver is automatically deleted. If only helper devices are found, hardware
+health is NOT_CHECKED; their presence does not establish a working storage bus.
+
+After a successful network apply, a later health-check failure leaves that network
+configuration in place. To repeat checks without applying it again, run
+`Restore-And-TestMigrationState.ps1` without parameters (ValidateOnly by default).
+The existing capture is discovered as usual, and new reports are produced.
+
+After validation, Full/ApplyNetwork also checks for duplicate persistent IPv4
+routes left on absent source adapters. Cleanup requires an exact source computer
+name and captured source interface GUID. Normally it uses Win32_NetworkAdapter
+and a known PnP device absent from the present-device inventory. For the retired
+CIM rows which have cleared GUID/PNPDeviceID, it resolves the row's registry Index
+to its numbered network class key. NetCfgInstanceId must equal the captured GUID,
+DriverDesc must match the CIM row, and the registry connection name must match
+both the route alias and captured source alias. The old index and GUID must be
+absent from the live/hidden adapter inventory. Missing registry evidence prevents
+cleanup. It never relies
+on old interface indexes, names or MAC addresses alone. The old interface must
+have no active IPv4 routes and must not be any mapped target. Only captured
+persistent routes with the same destination, next hop and metric qualify; the
+replacement must exist uniquely in both policy stores on the verified VirtIO
+target. Cleanup requires a completed network comparison without FAIL, WARNING or
+NOT_CHECKED results. An unrelated MSI or disk failure does not disable separately
+verified route cleanup; it still appears in the overall health result.
+
+All planned removals are saved before the first deletion to a unique
+`ObsoleteRoutesBackup-<id>.json` in the restore run directory. The file records
+the old interface GUID, PnP identity or registry evidence method, current interface index, prefix, next hop,
+metric, policy store and replacement interface. Each identity and route is checked
+again immediately before deletion. Failures stop further cleanup and produce a
+warning; completed cleanup is not rolled back automatically. Preserve the backup
+for manual recovery, rechecking interface identity before recreating any route.
+
+ValidateOnly/CompareOnly report verified leftovers without changing them; WhatIf
+writes no cleanup backup and deletes nothing. An absent adapter that Windows no
+longer exposes through CIM, or any other uncertain identity/replacement, is left
+unchanged with a manual-review warning. Unrelated routes are left unchanged.
+Optional hidden-adapter removal runs after route cleanup so its identity evidence
+is still available. The normal post-state snapshot describes the restored active
+network; cleanup outcomes and backup paths are recorded in the report separately.
+
+Route metrics are restored numerically from the export. `route print` can show
+`Default` for the original gateway and an explicit value for the recreated route.
+Compare RouteMetric and InterfaceMetric to verify priority rather than the label.
+In the test capture, the source already had RouteMetric 256 and InterfaceMetric
+15; the restored route has the same values and combined metric 271.
+
+## State capture, reports and rollback to VMware
+
+Export is read-only by default and preserves software/services. It records network,
+disk/volume, service, role, share, task, listening-port and event baselines plus raw
+`ipconfig /all`, `route print -4` and `arp -a` outputs. Protect access to capture
+files because they contain internal infrastructure information.
+
+Steps 1 and 2 also read `Win32_BIOS.SerialNumber`. The export preserves the source
+value in `PreMigrationState.json` under `systemIdentity.biosSerialNumber` and
+displays it near the top of `PreMigrationState.txt`. Use this value when manually
+configuring the restored VM's serial number in Proxmox if required by an application.
+No Proxmox configuration or serial-number change is performed by the scripts.
+An empty, ambiguous or unreadable BIOS value produces a visible collection warning;
+the remaining capture continues. Manual query on the source VM:
+
+```powershell
+Get-CimInstance Win32_BIOS | Select-Object SerialNumber
+```
+
+The main script's **2) Prepare** preserves the original behavior: it captures and
+writes the original service baseline first, then stops/disables `VMTools`,
+`VGAuthService`, `VMVss` and `VM3DService` when present. Source Tools are not
+uninstalled. A missing original service baseline prevents the service changes;
+stop/disable failures are recorded and return a blocking code. The confirmation
+prompt describes these changes, and WhatIf launches no modifying child script.
+Advanced callers can opt out with `-DisableVMwareTools:$false`. The standalone
+exporter remains read-only by default and changes services only with its own
+`-DisableVMwareTools` option.
+
+For rollback, start the preserved original VMware VM and restore startup/running
+states from its captured `services.all` baseline. Re-enabling only VMTools does
+not restore the other services. This source rollback is separate from network
+rollback on the Proxmox VM. Preserve the original VMware VM and backup until the
+migration is approved; Firstboot may already have removed Tools from the restored
+copy.
+
+Firstboot may uninstall Tools on the restored copy. When it leaves Tools installed,
+normal step 3 attempts the MSI uninstall after Firstboot has finished. If MSI fails,
+review its log and any service-remnant fallback result. The scoped Full-mode
+fallback uses `sc.exe delete`: [Microsoft documents that this deletes the service registry
+subkey](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/sc-delete).
+Deleting service registrations does not establish that the product, drivers and
+installer registration have been fully removed.
+
+Reports are created in unique `C:\VM_migration_yyyy-MM-dd\<script>*` directories.
+Post reports are `Reports\PostMigrationReport.json`, `.html` and `.txt`.
+The post snapshot and rollback JSON are stored in the restore run directory.
+Source exports are never overwritten by post-migration output. If route capture
+fails, adapter data is retained with `routeCaptureComplete: false`; that partial
+export is diagnostic data and cannot be used for automatic restoration. Prepare
+stops before source service changes and reports the capture failure explicitly.
+Post-restore checks distinguish capture failures by their originating check-name
+prefix. Multi-NIC planning, uncaptured-interface routes and unavailable BitLocker
+inventory remain visible warnings; mentioning network configuration in a planning
+message does not itself block restoration. Actual network/raw-output capture
+failures still block automatic changes.
+
+DC health can also be run separately:
+
+```powershell
+.\Test-DCMigrationHealth.ps1 -Mode PreMigration
+.\Test-DCMigrationHealth.ps1 -Mode PostMigration -CompareWith '<previous Results.json>'
+```
+
+These standalone checks require the ActiveDirectory module and appropriate
+permissions. In the menu workflow they run only for a detected DC with Deep
+selected, scoped to that server. Their deviations are reported for review;
+standard Migration checks do not run the full DC health script.
+
+## Exit codes
+
+Step 3 includes stable diagnostic identifiers in console messages and, for adapter
+mapping, the report. These do not change the numeric exit-code contract:
+
+- `MIG-NET-001`: adapter mapping failed before network restoration. Source and
+  target NIC names/MACs are listed. A missing source MAC prompts the operator to
+  check whether VMware MACs were copied to Proxmox, whether NICs/drivers are
+  present, or whether an explicit mapping is required. Mutating restore modes
+  still exit with 20; read-only modes retain a warning.
+- `MIG-FIRSTBOOT-001`: Firstboot remains pending/unknown; inspect the evidence.
+- `MIG-FIRSTBOOT-002`: no pending scripts, all blocking services are Firstboot-named,
+  Running and Disabled, and the last log entry is `Service uninstalled successfully`.
+  The gate remains closed but suggests restarting Windows once from the Start menu
+  in the Proxmox console and retrying ValidatePost. This is a cleanup hint, not proof
+  that Windows marked the service for deletion. No automatic restart/deletion occurs.
+  Other pending/unknown conditions do not receive this restart hint. The main
+  Firstboot gate still exits with 2 (standalone restore execution failure: 99).
+
+- Main: `0` success, `1` accepted warnings, `2` orchestration/prerequisite failure,
+  or a blocking child exit code. Failed phases never print overall success.
+- Readiness: `0` success, `1` warnings, `2` failed checks, `3` execution failure.
+- Export: `0` complete, `50` capture warnings, `52` incomplete network capture
+  (blocks preparation before source service changes), `51` explicit service shutdown
+  failure; other nonzero codes indicate blocked/failed capture.
+- Driver preparation: `0` success, `3010` reboot required, `1` failure.
+- Restore: `0` success, `1` warnings, `2` failed checks, `10` elevation failure,
+  `20` invalid input/identity/mapping, `40` network failure with successful rollback,
+  `41` rollback failure, `99` execution/Firstboot-gate failure.
+- DC health: `0` healthy, `1` warnings, `2` unhealthy, `3` execution failure.
+
+## Validation before production use
+
+From the repository root, run the portable regression tests:
+
+```powershell
+.\tests\Test-MigrationLogic.ps1
+.\tests\Test-MigrationAssessment.ps1
+.\tests\Test-DirectImport.ps1
+```
+
+The suite parses every migration script and tests safety/decision logic with
+mocked Windows commands. It never runs the real migration scripts or modifies
+real adapters, disks, services, drivers or registry keys.
+
+Before making this branch the shared production workflow, rehearse the Veeam path
+on a test VM: select Veeam in step 1, verify automatic reuse in step 2, perform the
+normal backup/restore and let Firstboot finish, then run step 3. Check NIC mapping,
+IPv4/DNS/routes, VMware Tools cleanup, guest agent status and before/after reports.
+Keep the existing Firstboot gate and preparation confirmation enabled. Rehearse
+direct ESXi import separately; passing portable tests does not verify a real restore.
+
+With PSScriptAnalyzer installed:
+
+```powershell
+Get-ChildItem -Path . -Filter *.ps1 |
+    Invoke-ScriptAnalyzer -Settings .\tests\PSScriptAnalyzerSettings.psd1
+```
+
+The settings check PowerShell 5.1 syntax and selected safety rules. They do not
+prove Windows API compatibility. Perform an isolated restore rehearsal on the
+actual supported Windows releases, including Firstboot, driver bootability,
+static/DHCP networking, extra routes, error/rollback paths, applications and DC
+health where applicable. Firstboot service/file layouts may differ by restore
+version; an unknown layout stops rather than bypasses the gate.
