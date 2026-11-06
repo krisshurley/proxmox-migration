@@ -1,5 +1,25 @@
 # Användarguide: flytta en Windows-VM från VMware till Proxmox
 
+> **Utvecklingsbranch `dev` – nytt testflöde i steg 3.** Steg 1 och 2 använder samma förberedelser som tidigare. Menyscriptet aktiverar här en ny VMware Tools-avinstallation som sparar status och fortsätter när du kör steg 3 igen efter manuell omstart. MSI-vägen har ingen fast versionsspärr: produktidentitet, kända installationsåtgärder och deras DLL-referenser kontrolleras i det aktuella paketet. Okända eller tvetydiga upplägg stoppas utan MSI-ändring. Läs [testinstruktionen](VMwareToolsCleanup/README.md). Det tidigare sammanhängande flödet har provats med Tools 13.0.10; det nya dynamiska åtgärdsurvalet behöver nu provas på Windows, särskilt med andra versioner. Ingen Microsoft-felsökare används och inga automatiska omstarter eller schemalagda aktiviteter skapas.
+>
+> Vid test av en annan Tools-version kan MSI-paketet först granskas utan avinstallation: `.\VMwareToolsCleanup\Invoke-MsiUninstall.ps1 -SkipGuestHandlerRestore`. Kör på Proxmox-VM:en i administrativ 64-bitars Windows PowerShell 5.1, med QEMU Guest Agent igång, färdig Firstboot och frisk PCI VirtIO SCSI-kontroller. Endast rapporter skrivs. `inspection.json` visar produkt/version, paketets åtgärder, planerade ändringar och om upplägget accepterades. Ett annat versionsnummer är ingen garanti för kompatibilitet. En saknad enskild åtgärd behöver inte tas bort; om inga kända åtgärder finns krävs manuell hantering.
+
+> Efter första körningen av steg 3: starta om när rapporten begär det och kör sedan steg 3 igen. Efter efterstädningen behövs ytterligare en manuell omstart och steg 3 för slutkontrollen. Behåll exportmappen, `VMwareToolsCleanup\Workflow.json` och alla backuper. Ett fel eller en avbruten MSI-körning återförs inte automatiskt. För en ny migration kan tidigare städväg väljas med `.\Migrate-VmwareToProxmox.ps1 -UseExtendedToolsCleanup:$false`. En redan påbörjad ny körning kan inte hoppas över med flaggan.
+
+> I steg 3 väljer du **1) Automatic cleanup (default)** eller **2) Manual cleanup**. Valet sparas med den valda fångsten och återanvänds efter omstart, för både Veeam och import. Manuellt läge lämnar Tools-avinstallation och reststädning åt teknikern; nätverk, routes och övriga kontroller körs vidare. Tools och manuellt kvarstående arbete redovisas som varningar, inte som lyckad avinstallation. En tidigare automatisk städstatus och dess backuper behålls. Tidigare omstartskrav måste fortfarande följas upp. För att byta ett sparat val: `.\Migrate-VmwareToProxmox.ps1 -Phase ValidatePost -ToolsCleanupMode Manual` eller `-ToolsCleanupMode Automatic`. **`-UseExtendedToolsCleanup:$false` väljer den äldre automatiska städvägen, inte manuellt läge.**
+
+> Vid begärd omstart avslutas terminalen med **RESTART REQUIRED**, följt av instruktion att starta om Windows och välja steg 3 igen. Den fristående återställningen använder då exitkod `3010`; huvudmenyn visar omstartsrutan och lämnar varningskod `1`. Övriga fel behåller sina felkoder.
+
+
+> Första bekräftelsen i steg 3 omfattar även de två planerade omstartsfortsättningarna. Efter omstart väljer du bara **3** igen. `Step3Approval.json` sparas vid den valda exporten och återanvänds endast när samma VM (MachineGuid/SMBIOS-UUID), export, aktuella kortidentiteter, scriptfiler och körval fortfarande matchar och städflödet väntar på en av de planerade omstarterna. Interface-index får ändras. Om nätverksinställningarna avviker eller inte kan verifieras krävs en ny bekräftelse före återställning. Firstboot-, kort-, MSI-, backup- och övriga säkerhetskontroller körs fortfarande.
+
+> Efter slutförd körning, avböjande eller hanterat fel tas bekräftelsen bort. Avbrutna/felaktiga städsteg och helt nya körningar får inte återanvända den. Ändrade val eller scriptversion ger ny bekräftelse. Explicit `-Confirm` begär en ny fråga och `-Confirm:$false` gäller som uttryckligt godkännande för den aktuella körningen. `-WhatIf` skapar eller ändrar ingen sparad bekräftelse. Om identiteten inte kan verifieras eller filen inte kan sparas används vanlig bekräftelse även vid nästa fortsättning. Omstartsrutan visas en gång via menyn; den visas också vid fristående återställning.
+
+
+> Mellankörningarna gäller både **Veeam/Firstboot och Proxmox ESXi-import**: när städningen väntar på omstart sparas en delrapport märkt `IntermediateRestartRequired`. Nätverket verifieras och verifierade gamla routes kan städas, men fullständig tillståndsjämförelse och händelseloggsexport väntar till slutkörningen. En ny avläsning av kortidentitet, IP, DNS, gateway, metric och routes avgör om nätverksåterställningen kan hoppas över. Vid avvikelse används återställningen med befintligt rollback-skydd. Ingen delrapport innebär att slutvalideringen är färdig.
+
+
+
 **Alternativ testbranch: `codex/direct-esxi-import`.** För ordinarie
 Veeam/Firstboot-flyttar använder övriga tekniker fortsatt `main`. Den här branchen
 lägger till direkt ESXi-import. Prepare har slutförts på test-VM:en med Windows
@@ -534,6 +554,42 @@ På samma sätt är en jämförelse av DNS-inställningar inte ett lyckat DNS-up
 Domänkontrollanter behöver dessutom verifierad AD-replikering, DNS och övriga
 kontroller enligt er rutin för domänkontrollanter. Skriptets resultat ersätter
 inte serverns funktionstest eller er bedömning av när migreringen är klar.
+
+## Begränsad efterstädning av tidigare migrerade VM:ar
+
+Detta är en separat flagga, inte ett menyval eller steg 3. Ingen originalexport från
+steg 2 behövs. Kör från det nya scriptpaketet i en administrativ 64-bitars PowerShell
+på den redan migrerade QEMU/KVM-VM:en, med QEMU Guest Agent igång och Firstboot klart.
+
+Förhandsgranska först (inga rapporter, backuper eller inställningar skrivs):
+
+```powershell
+.\Migrate-VmwareToProxmox.ps1 -LegacyToolsCleanup -WhatIf
+```
+
+Utför sedan den begränsade åtgärden efter att ha granskat förslaget:
+
+```powershell
+.\Migrate-VmwareToProxmox.ps1 -LegacyToolsCleanup
+```
+
+Åtgärden säkerhetskopierar och tar bort endast verifierade, **stoppade** Tools-tjänster
+(`VMTools`, `VGAuthService`, `VM3DService` och direkt EXE-baserad `VMVss`) samt den
+verifierade `VMware User Process`-posten i datorns vanliga/32-bitars Run-nyckel.
+Körande tjänster, oväntade sökvägar och COM+-hanterad `VMVss` lämnas kvar för granskning.
+Redan borttagna tjänster är inget fel. Användarprofiler och redan körande användarprocesser
+ändras inte; en borttagen autostart gäller nästa inloggning.
+
+**Detta är inte en fullständig avinstallation.** Nätverk, routes, avinstallationsposten i
+Programs, MSI-registrering, COM+, filer och drivrutiner lämnas orörda. Ingen omstart görs
+automatiskt. Eventuellt väntande tjänsteborttagning redovisas för uppföljning.
+
+Rapporter och backuper sparas i en unik undermapp under `C:\temp\VMware-LegacyCleanup`:
+`Before.json` innehåller de exakta autostartvärdena och deras typer, tjänsterna har separata
+`.reg`-backuper och `Report.json`/`Report.txt` visar resultat och kvarvarande poster.
+Vid avbruten körning sparas `Failure.json` när rapportmappen har hunnit skapas.
+Backuper verifieras före första borttagningen; någon automatisk återställning görs inte.
+Flaggan får inte kombineras med `-Phase`, `-StateDirectory` eller andra migreringsval.
 
 ## Kör bara kontrollerna igen
 

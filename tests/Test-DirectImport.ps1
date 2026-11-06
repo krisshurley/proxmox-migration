@@ -8,6 +8,7 @@ $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'Migration.Common.ps1')
 . (Join-Path $root 'Migration.DirectImport.ps1')
 . (Join-Path $root 'Migration.StorageDriver.ps1')
+. (Join-Path $root 'Migration.VMwareToolsCleanup.ps1')
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('direct-import-tests-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory $temp
 $passed = 0
@@ -28,7 +29,7 @@ function Get-RunnerFixture {
     $body=@($ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.TryStatementAst] })[0].Body
     # Execute the real runner, omitting only Windows elevation checks and process exit.
     $statements=@($body.Statements | Where-Object { $_.Extent.Text -notmatch 'WindowsIdentity|WindowsPrincipal|IsInRole' -and $_ -isnot [Management.Automation.Language.ExitStatementAst] } | ForEach-Object { $_.Extent.Text })
-    $setup='$script:InteractiveMenu=-not $Phase; $script:MethodExplicit=$PSBoundParameters.ContainsKey("MigrationMethod"); $script:LevelExplicit=$PSBoundParameters.ContainsKey("CheckLevel"); $script:PhaseExitCode=0;'
+    $setup='$script:InteractiveMenu=-not $Phase; $script:MethodExplicit=$PSBoundParameters.ContainsKey("MigrationMethod"); $script:LevelExplicit=$PSBoundParameters.ContainsKey("CheckLevel"); $script:PhaseExitCode=0; $script:RestartRequired=$false; $script:Step3ApprovalDirectory="";'
     [scriptblock]::Create('[CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact="High")]'+$ast.ParamBlock.Extent.Text+$setup+($statements -join "`n"))
 }
 function Invoke-PreparationFixture {

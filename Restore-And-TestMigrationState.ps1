@@ -20,6 +20,10 @@
     Optional JSON mapping every captured source MAC to a target MAC. Without it,
     preserved MACs are matched automatically. Adapter order is never used.
 
+.PARAMETER UseExtendedToolsCleanup
+    Opts Full mode into the experimental, restart-aware VMware Tools cleanup.
+    The menu runner enables this on dev. Existing workflow state is always resumed
+    in Full mode. Read-only modes never execute the workflow.
 .PARAMETER Force
     Allows validation to continue when the captured computer name differs from the
     current computer name. It does not bypass ambiguous adapter mapping.
@@ -65,6 +69,10 @@ param(
     [datetime]$MigrationTimestamp,
     [switch]$DeepScan,
     [switch]$FirstbootNotUsed,
+    [switch]$UseExtendedToolsCleanup,
+    [switch]$ResumeApproved,
+    [switch]$RestartBannerHandledByCaller,
+    [ValidateSet('Automatic','Manual')][string]$ToolsCleanupMode='Automatic',
     [ValidateSet('VeeamFirstboot','DirectImport')][string]$MigrationMethod = 'VeeamFirstboot',
     [switch]$RepairOfflineDisks,
     [switch]$RemoveHiddenVMwareAdapters
@@ -75,6 +83,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Migration.Common.ps1')
 . (Join-Path $PSScriptRoot 'Migration.Assessment.ps1')
 . (Join-Path $PSScriptRoot 'Migration.DirectImport.ps1')
+. (Join-Path $PSScriptRoot 'Migration.VMwareToolsCleanup.ps1')
 
 function New-MigrationPath {
     param([string]$ScriptName)
@@ -111,7 +120,7 @@ $ReportHtmlPath = Join-Path $ReportDirectory 'PostMigrationReport.html'
 $ReportTextPath = Join-Path $ReportDirectory 'PostMigrationReport.txt'
 $SchemaVersion = '1.0'
 # Fixed internal build stamp to verify which copy is deployed on a target machine.
-$CodeRevision = '2026-11-02.1'
+$CodeRevision = '2026-11-06.4'
 $script:LogWriter = $null
 $script:Results = New-Object System.Collections.ArrayList
 $script:Actions = New-Object System.Collections.ArrayList
@@ -120,9 +129,12 @@ $script:PreNetwork = $null
 $script:CurrentNetwork = $null
 $script:RollbackCreated = $false
 $script:NetworkChanged = $false
+$script:NetworkVerifiedLive = $false
 $script:NetworkComparisonComplete = $false
 $script:NetworkComparisonPassed = $false
 $script:AdapterMappings = @()
+$script:ToolsRestartPending = $false
+$script:ReportPhase = 'Validation'
 $script:StartTime = [DateTime]::UtcNow
 
 function Get-StateColor {
@@ -696,7 +708,7 @@ function Remove-ObsoleteMigrationRoutes {
         Add-Action 'Obsolete routes' 'WHATIF' 'No obsolete routes or backup files were changed.'
         return
     }
-    if (-not $script:NetworkChanged) { throw 'Obsolete route cleanup requires a successful network restoration in this run.' }
+    if (-not $script:NetworkChanged -and -not $script:NetworkVerifiedLive) { throw 'Obsolete route cleanup requires a successful network restoration or a fresh complete live verification in this run.' }
     # Network comparison is tracked independently: unrelated MSI/disk failures
     # must not disable a separately verified route cleanup.
     if (-not $script:NetworkComparisonComplete -or -not $script:NetworkComparisonPassed) {
@@ -1189,8 +1201,14 @@ function Get-VMwareToolsServices {
     }
 }
 function Invoke-PostMigrationToolsCleanup {
+    [CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact='High')]
     param([switch]$FirstbootNotUsed)
     if ($Mode -ne 'Full') { return }
+    if ($ToolsCleanupMode -eq 'Manual') {
+        Add-Result 'VMware Tools cleanup' 'WARNING' 'Manual mode selected: no Tools MSI uninstall or residual cleanup was attempted. Network restoration and validation continue.'
+        Add-Action 'VMware Tools cleanup' 'MANUAL_REVIEW' 'Uninstall/verify VMware Tools manually. Any existing automatic cleanup state and backups were preserved; previous restart requirements still need review.'
+        return
+    }
     if ($script:PreState.systemIdentity.computerName -ine $env:COMPUTERNAME -or
         $script:AdapterMappings.Count -eq 0 -or
         @($script:AdapterMappings | Where-Object { -not $_.target.isVirtIO }).Count) {
@@ -1199,6 +1217,31 @@ function Invoke-PostMigrationToolsCleanup {
     }
     foreach ($mapping in $script:AdapterMappings) { Assert-MigrationTargetIdentity $mapping }
     $null = Assert-MigrationFirstbootComplete -FirstbootNotUsed:$FirstbootNotUsed
+    $workflowState = Join-Path $StateDirectory (Join-Path 'VMwareToolsCleanup' 'Workflow.json')
+    if ($UseExtendedToolsCleanup -or (Test-Path -LiteralPath $workflowState)) {
+        if (-not $PSCmdlet.ShouldProcess($env:COMPUTERNAME, 'Run/resume backed-up experimental VMware Tools MSI cleanup; manual restarts required')) {
+            Add-Action 'VMware Tools cleanup workflow' 'WHATIF' 'No workflow, MSI modification or residual cleanup was executed.'
+            return
+        }
+        try {
+            $exitCode=Invoke-MigrationChildScript (Join-Path $PSScriptRoot 'Invoke-VMwareToolsCleanup.ps1') @{StateDirectory=$StateDirectory;Confirm=$false}
+            if ($exitCode -notin @(0,1)) { throw "VMware Tools workflow failed (exit $exitCode). Review $workflowState and its worker logs." }
+            if (-not (Test-Path -LiteralPath $workflowState)) { throw 'Cleanup worker did not produce workflow state.' }
+            $cleanupState=Get-Content -LiteralPath $workflowState -Raw -ErrorAction Stop|ConvertFrom-Json
+            if ($cleanupState.stage -in @('AwaitingMsiReboot','AwaitingResidualReboot')) {
+                $script:ToolsRestartPending = $true
+                Add-Result 'VMware Tools cleanup workflow' 'WARNING' "Cleanup stage $($cleanupState.stage): restart Windows manually, then rerun step 3." @("State and backups: $workflowState")
+                Add-Action 'VMware Tools cleanup workflow' 'MANUAL_REVIEW' 'Restart Windows manually; rerun ValidatePost to resume. Do not delete workflow state or backups.'
+            } elseif ($cleanupState.stage -eq 'Complete' -and $exitCode -eq 0) {
+                Add-Result 'VMware Tools cleanup workflow' 'PASS' 'MSI/residual workflow and defined post-restart checks completed.' @("Reports: $($cleanupState.verificationRun)")
+                Add-Result 'VMware Tools cleanup scope' 'WARNING' 'Verification covers the defined Tools components. Unloaded profiles and all MSI component references are outside final verification.' @("MSI modified: $(Get-MigrationProperty $cleanupState 'msiModified' $true); Guest Handler restoration skipped: $(Get-MigrationProperty $cleanupState 'guestHandlerRestoreSkipped' $true).")
+            } else { throw "Unexpected cleanup stage: $($cleanupState.stage). Review logs before continuing." }
+        } catch {
+            Add-Result 'VMware Tools cleanup workflow' 'FAIL' 'Extended cleanup stopped; no legacy service-deletion or Microsoft troubleshooting fallback was attempted.' @($_.Exception.Message)
+            Add-Action 'VMware Tools cleanup workflow' 'MANUAL_REVIEW' "Review workflow/backups: $workflowState. Interrupted MSI changes are not automatically retried or rolled back."
+        }
+        return
+    }
     Remove-VMwareToolsUninstall -AllowServiceFallback
 }
 function Get-MigrationComServiceApplications {
@@ -1403,6 +1446,71 @@ function Test-QemuAgentAndVMwareTools {
         Add-Action 'Proxmox QEMU Guest Agent option' 'MANUAL_REVIEW' 'Verify Options > QEMU Guest Agent is enabled in Proxmox. A running Windows service alone does not verify the host channel or communication.'
     }
 }
+function Test-MappedNetworkAlreadyRestored {
+    param($Mappings)
+    # No saved interface indexes or completion markers authorize this shortcut.
+    # Re-read the live mapped identities, every setting, and both route stores.
+    foreach ($mapping in @($Mappings)) {
+        Assert-MigrationTargetIdentity $mapping
+        if (-not $mapping.target.isVirtIO) { return $false }
+        $nic=Get-NetAdapter -InterfaceIndex $mapping.target.adapter.interfaceIndex -ErrorAction Stop
+        if ($nic.Status -ne 'Up') { return $false }
+        $actual=Get-AdapterRecord $nic
+        $source=$mapping.source
+        foreach ($field in @('dhcpEnabled','dnsAutomatic','dnsSuffix','registerThisConnectionAddress','useSuffixWhenRegistering','interfaceMetric')) {
+            if ($null -eq $source.PSObject.Properties[$field] -or $null -eq $actual.PSObject.Properties[$field] -or
+                $null -eq $source.$field -or $null -eq $actual.$field -or [string]$source.$field -ine [string]$actual.$field) { return $false }
+        }
+        if (-not $source.dnsAutomatic -and (@($source.dnsServers) -join '|') -ine (@($actual.dnsServers) -join '|')) { return $false }
+        $addresses=@(Get-AdapterIPv4Addresses -InterfaceIndex $actual.interfaceIndex)
+        if (-not @($addresses|Where-Object { $_.AddressState -eq 'Preferred' -and $_.IPAddress -notlike '169.254.*' }).Count -or
+            @($addresses|Where-Object AddressState -in @('Duplicate','Tentative')).Count) { return $false }
+        if (-not $source.dhcpEnabled) {
+            $expected=@($source.ipv4Addresses|ForEach-Object { "$($_.address)/$($_.prefixLength)" }|Sort-Object)
+            $observed=@($actual.ipv4Addresses|ForEach-Object { "$($_.address)/$($_.prefixLength)" }|Sort-Object)
+            if (($expected -join '|') -ne ($observed -join '|') -or
+                (@($source.defaultGateways|Where-Object {$_}|Sort-Object) -join '|') -ne (@($actual.defaultGateways|Sort-Object) -join '|')) { return $false }
+        }
+        $routes=@($script:PreNetwork.ipv4Routes|Where-Object { $_.interfaceIndex -eq $source.interfaceIndex -and $_.isPersistentOrStatic -and -not $_.isConnectedRoute })
+        if (-not $source.dhcpEnabled) {
+            foreach ($gateway in @($source.defaultGateways|Where-Object {$_})) {
+                if (-not @($routes|Where-Object { $_.destinationPrefix -eq '0.0.0.0/0' -and $_.nextHop -eq $gateway }).Count) {
+                    $routes += [pscustomobject]@{destinationPrefix='0.0.0.0/0';nextHop=$gateway;routeMetric=256;store='PersistentStore';protocol='NetMgmt'}
+                }
+            }
+        }
+        if (@($routes|Where-Object protocol -eq 'Unknown').Count) { return $false }
+        foreach ($store in @('ActiveStore','PersistentStore')) {
+            $live=@(Get-MigrationNetRoutes -InterfaceIndex $actual.interfaceIndex -PolicyStore $store)
+            foreach ($route in $routes) {
+                if ($route.store -notin @('ActiveStore','PersistentStore')) { return $false }
+                if ($store -eq 'PersistentStore' -and $route.store -ne 'PersistentStore') { continue }
+                if (-not @($live|Where-Object { $_.DestinationPrefix -eq $route.destinationPrefix -and $_.NextHop -eq $route.nextHop -and [int]$_.RouteMetric -eq [int]$route.routeMetric }).Count) { return $false }
+            }
+        }
+    }
+    return @($Mappings).Count -gt 0
+}
+function Complete-PostMigrationNetworkChecks {
+    $networkResultStart=$script:Results.Count
+    Compare-NetworkState
+    $script:NetworkComparisonPassed=@($script:Results|Select-Object -Skip $networkResultStart|Where-Object state -in @('FAIL','WARNING','NOT_CHECKED')).Count -eq 0
+    $script:NetworkComparisonComplete=$true
+}
+function Complete-PendingToolsCleanupReport {
+    if (-not $script:ToolsRestartPending) { return $false }
+    $script:ReportPhase='IntermediateRestartRequired'
+    Invoke-SafePart 'Network state comparison' { Complete-PostMigrationNetworkChecks }
+    Invoke-SafePart 'Obsolete persistent routes' { Remove-ObsoleteMigrationRoutes }
+    Add-Action 'Final validation' 'DEFERRED_UNTIL_RESTART' 'Service/disk/collection comparisons, operational log export and full final validation run after cleanup restart checkpoints are complete.'
+    Write-Log 'INTERMEDIATE RESULT: restart Windows manually, then select 3 again. Final validation has not run.' ([ConsoleColor]::Yellow)
+    return $true
+}
+function Confirm-MigrationResumeNetworkChange {
+    [CmdletBinding(SupportsShouldProcess=$true,ConfirmImpact='High')]
+    param([string]$Targets)
+    $PSCmdlet.ShouldProcess($Targets,'Live network settings differ or cannot be verified. Reapprove restoration from the captured configuration before continuing the saved workflow')
+}
 function Restore-Network {
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param($Mapping)
@@ -1411,6 +1519,20 @@ function Restore-Network {
     if (-not $PSCmdlet.ShouldProcess($names, 'Save all target snapshots and restore the complete source network plan')) {
         Add-Action 'Network restoration' 'WHATIF' 'No rollback file, network settings or devices were changed.'
         return
+    }
+    if ($UseExtendedToolsCleanup -or (Test-Path -LiteralPath (Join-Path $StateDirectory 'VMwareToolsCleanup/Workflow.json'))) {
+        # A read failure is not evidence that settings match. Let the normal
+        # snapshot/restore path handle it, with its existing rollback safeguards.
+        $matches=$false
+        try { $matches=Test-MappedNetworkAlreadyRestored $plan } catch { Write-Log "Network precheck could not verify all settings: $($_.Exception.Message)" }
+        if ($matches) {
+            $script:NetworkVerifiedLive=$true
+            Add-Result 'Network restoration' 'PASS' 'Live mapped network settings and routes already match; no network settings were changed.'
+            return
+        }
+        if ($ResumeApproved -and -not (Confirm-MigrationResumeNetworkChange -Targets $names -Confirm:$true)) {
+            throw 'Network restoration cancelled: live network drift requires renewed approval.'
+        }
     }
     # All snapshots must succeed before the first adapter changes.
     Save-RollbackState $plan
@@ -1499,13 +1621,17 @@ function Write-Reports {
     $migrationChecks=@($script:Results | Where-Object { $_.name -notin @('Operational before/after assessment','Running services','Listening ports','Post-migration event logs','Connectivity','DNS connectivity','Gateway ICMP','Application connectivity','VSS writers') })
     $migrationStatus=if (@($migrationChecks | Where-Object state -eq 'FAIL').Count) {'FAIL'} elseif (@($migrationChecks | Where-Object state -in @('WARNING','NOT_CHECKED')).Count) {'WARNING'} else {'PASS'}
     $summary['migrationChecksStatus']=$migrationStatus
-    $summary['operationalAssessmentPath']=Join-Path $RootPath 'Assessment\AssessmentSummary.json'
+    $summary['reportPhase']=$script:ReportPhase
+    $summary['restartRequired']=[bool]$script:ToolsRestartPending
+    $summary['toolsCleanupMode']=$ToolsCleanupMode
+    $summary['operationalAssessmentPath']=if ($script:ReportPhase -eq 'IntermediateRestartRequired') { $null } else { Join-Path $RootPath 'Assessment\AssessmentSummary.json' }
+    $evidenceLabel=if ($script:ReportPhase -eq 'IntermediateRestartRequired') { 'Deferred until cleanup restart checkpoints are complete.' } else { 'Assessment/Report.html' }
     $report = [ordered]@{ schemaVersion = $SchemaVersion; generatedAtUtc = [DateTime]::UtcNow.ToString('o'); mode = $Mode; stateDirectory = $StateDirectory; summary = $summary; results = @($script:Results); actions = @($script:Actions); preMigrationStatePath = $StateJsonPath; postMigrationStatePath = $PostStatePath; rollbackPath = if ($script:RollbackCreated) { $RollbackPath } else { $null } }
     $report | ConvertTo-Json -Depth 15 | Set-Content -Path $ReportJsonPath -Encoding UTF8
-    $html = @('<!doctype html><html><head><meta charset="utf-8"><title>Post-Migration Validation</title><style>body{font-family:Segoe UI,Arial,sans-serif;margin:2rem;color:#202124}h1{color:#174a7e}.PASS{color:#187a3d}.WARNING{color:#9a6700}.FAIL{color:#b42318}.EXPECTED_CHANGE{color:#176b87}table{border-collapse:collapse;width:100%;margin-bottom:1.5rem}th,td{border:1px solid #d0d7de;padding:.45rem;text-align:left;vertical-align:top}th{background:#eef2f6}.summary{padding:1rem;background:#f5f7fa;border-left:5px solid #174a7e}</style></head><body>'); $html += "<h1>Post-Migration Validation</h1><div class='summary'><strong>Overall result: <span class='$($summary.overallStatus)'>$($summary.overallStatus)</span></strong><br>Generated UTC: $($report.generatedAtUtc)<br>Mode: $Mode<br>Migration checks: $migrationStatus<br>Operational evidence: Assessment/Report.html</div><h2>Summary counts</h2><table><tr><th>State</th><th>Count</th></tr>"; foreach ($key in $summary.counts.Keys) { $html += "<tr><td>$key</td><td>$($summary.counts[$key])</td></tr>" }; $html += '</table><h2>Results</h2><table><tr><th>State</th><th>Check</th><th>Summary</th><th>Details</th></tr>'; foreach ($item in $script:Results) { $html += "<tr><td class='$($item.state)'>$($item.state)</td><td>$($item.name)</td><td>$($item.summary)</td><td>$([System.Net.WebUtility]::HtmlEncode(($item.details -join '<br>')))</td></tr>" }; $html += '</table><h2>Actions and manual follow-up</h2><pre>'; $html += [System.Net.WebUtility]::HtmlEncode((@($script:Actions | ConvertTo-Json -Depth 10) -join "`r`n")); $html += '</pre></body></html>'; $html | Set-Content -Path $ReportHtmlPath -Encoding UTF8
+    $html = @('<!doctype html><html><head><meta charset="utf-8"><title>Post-Migration Validation</title><style>body{font-family:Segoe UI,Arial,sans-serif;margin:2rem;color:#202124}h1{color:#174a7e}.PASS{color:#187a3d}.WARNING{color:#9a6700}.FAIL{color:#b42318}.EXPECTED_CHANGE{color:#176b87}table{border-collapse:collapse;width:100%;margin-bottom:1.5rem}th,td{border:1px solid #d0d7de;padding:.45rem;text-align:left;vertical-align:top}th{background:#eef2f6}.summary{padding:1rem;background:#f5f7fa;border-left:5px solid #174a7e}</style></head><body>'); $html += "<h1>Post-Migration Validation</h1><div class='summary'><strong>Overall result: <span class='$($summary.overallStatus)'>$($summary.overallStatus)</span></strong><br>Generated UTC: $($report.generatedAtUtc)<br>Mode: $Mode<br>Migration checks: $migrationStatus<br>Report phase: $($script:ReportPhase)<br>Tools cleanup mode: $ToolsCleanupMode<br>Operational evidence: $evidenceLabel</div><h2>Summary counts</h2><table><tr><th>State</th><th>Count</th></tr>"; foreach ($key in $summary.counts.Keys) { $html += "<tr><td>$key</td><td>$($summary.counts[$key])</td></tr>" }; $html += '</table><h2>Results</h2><table><tr><th>State</th><th>Check</th><th>Summary</th><th>Details</th></tr>'; foreach ($item in $script:Results) { $html += "<tr><td class='$($item.state)'>$($item.state)</td><td>$($item.name)</td><td>$($item.summary)</td><td>$([System.Net.WebUtility]::HtmlEncode(($item.details -join '<br>')))</td></tr>" }; $html += '</table><h2>Actions and manual follow-up</h2><pre>'; $html += [System.Net.WebUtility]::HtmlEncode((@($script:Actions | ConvertTo-Json -Depth 10) -join "`r`n")); $html += '</pre></body></html>'; $html | Set-Content -Path $ReportHtmlPath -Encoding UTF8
     
     # Text report with deferred route restoration commands
-    $lines = @('Post-migration validation report', "Overall result: $($summary.overallStatus)", "Generated UTC: $($report.generatedAtUtc)", "Migration checks: $migrationStatus", 'Operational evidence: Assessment/Report.html', '', 'Summary counts:')
+    $lines = @('Post-migration validation report', "Overall result: $($summary.overallStatus)", "Generated UTC: $($report.generatedAtUtc)", "Migration checks: $migrationStatus", "Report phase: $($script:ReportPhase)", "Tools cleanup mode: $ToolsCleanupMode", "Operational evidence: $evidenceLabel", '', 'Summary counts:')
     foreach ($key in $summary.counts.Keys) { $lines += ('  {0}: {1}' -f $key, $summary.counts[$key]) }
     $lines += ''
     foreach ($item in $script:Results) { $lines += "[$($item.state)] $($item.name): $($item.summary)"; foreach ($detail in $item.details) { $lines += "    $detail" } }
@@ -1548,6 +1674,13 @@ try {
         }
         if (-not (Test-CaptureCompleteness)) { $null = Write-Reports; exit 20 }
         if (-not (Test-ComputerIdentity)) { $null = Write-Reports; exit 20 }
+        if ($Mode -eq 'Full') {
+            $ToolsCleanupMode=Resolve-MigrationToolsCleanupChoice -StateDirectory $StateDirectory -Mode $ToolsCleanupMode -Explicit:($PSBoundParameters.ContainsKey('ToolsCleanupMode'))
+            if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess($StateDirectory,"Save VMware Tools cleanup choice: $ToolsCleanupMode")) {
+                try { Save-MigrationToolsCleanupChoice -StateDirectory $StateDirectory -Mode $ToolsCleanupMode }
+                catch { Add-Result 'VMware Tools cleanup choice' 'WARNING' "Using $ToolsCleanupMode for this run, but the choice could not be saved. Select the intended mode again next time." @($_.Exception.Message) }
+            }
+        }
         Report-ManualNetworkHandling
         $mappings = @(Resolve-AdapterMapping | Where-Object { $null -ne $_ })
         $script:AdapterMappings = $mappings
@@ -1562,17 +1695,12 @@ try {
             Invoke-SafePart 'Direct import QEMU Guest Agent startup' { Start-MigrationDirectImportAgent -Confirm:$false -WhatIf:$WhatIfPreference }
         }
         $script:CurrentNetwork = Get-CurrentNetworkState
+        if (Complete-PendingToolsCleanupReport) { $null=Write-Reports; if (@($script:Results|Where-Object state -eq 'FAIL').Count) { exit 2 }; if (-not $RestartBannerHandledByCaller) { Write-MigrationRestartInstructions }; exit 3010 }
         $postState = Get-PostMigrationState
         if (-not $WhatIfPreference) { $postState | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $PostStatePath -Encoding UTF8 }
         Invoke-SafePart 'Drive letter assignment' { Test-DriveLetterAssignment }
         Invoke-SafePart 'System state comparison' { Compare-SystemState }
-        Invoke-SafePart 'Network state comparison' {
-            $networkResultStart = $script:Results.Count
-            Compare-NetworkState
-            $networkProblems = @($script:Results | Select-Object -Skip $networkResultStart | Where-Object { $_.state -in @('FAIL', 'WARNING', 'NOT_CHECKED') })
-            $script:NetworkComparisonPassed = $networkProblems.Count -eq 0
-            $script:NetworkComparisonComplete = $true
-        }
+        Invoke-SafePart 'Network state comparison' { Complete-PostMigrationNetworkChecks }
         Invoke-SafePart 'Disk state comparison' { Compare-DiskState }
         Invoke-SafePart 'Service comparison' { Compare-Services }
         Invoke-SafePart 'Collection comparison' { Compare-Collections }
@@ -1583,6 +1711,7 @@ try {
         if ($CheckLevel -eq 'Deep') { Invoke-SafePart 'VSS writers' { Test-PostMigrationVss } }
         Invoke-SafePart 'Obsolete persistent routes' { Remove-ObsoleteMigrationRoutes }
         if ($RemoveHiddenVMwareAdapters -and $Mode -in @('Full', 'ApplyNetwork')) { Remove-HiddenVMwareAdapters }
+        $script:ReportPhase='Final'
         Invoke-SafePart 'Operational before/after assessment' { Invoke-PostMigrationAssessment }
     }
     $summary = Write-Reports

@@ -5,12 +5,23 @@
     Each child script runs in an isolated PowerShell process. Blocking failures stop
     the phase and warning exit codes are propagated. Full validation removes remaining VMware Tools
     using MSI only after Firstboot and target adapter verification.
+.PARAMETER LegacyToolsCleanup
+    Separate limited cleanup for previously migrated guests. Does not run a phase
+    or require a source capture. Supports -WhatIf; preserves MSI, files and drivers.
 .PARAMETER DriverPreparation
     Install (default) preserves source VirtIO preparation. FirstbootManaged skips
     it only when the selected restore method supplies boot-critical drivers.
 .PARAMETER MigrationMethod
     VeeamFirstboot (default) preserves the existing workflow. DirectImport stages
     network/serial drivers and QEMU Guest Agent, and declares no Firstboot at step 3.
+.PARAMETER UseExtendedToolsCleanup
+    Enabled by default on the dev branch. Runs the experimental, restart-aware
+    package-inspected MSI/residual workflow during step 3. Use :$false to select the
+    previous cleanup path for a new migration. Existing workflow state is resumed.
+.PARAMETER ToolsCleanupMode
+    Automatic (default) runs selected Tools cleanup. Manual preserves Tools and
+    runs the other step 3 work; remaining Tools are reported for manual follow-up.
+    The menu asks once per capture. An explicit parameter overrides the saved choice.
 .PARAMETER FirstbootNotUsed
     Explicitly declares a restore method without Guestfs/Firstboot. This cannot
     bypass an existing pending or unverified Firstboot conversion.
@@ -29,6 +40,7 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
     [ValidateSet('ReadinessCheck', 'Prepare', 'ValidatePost')][string]$Phase,
+    [switch]$LegacyToolsCleanup,
     [ValidateSet('Auto', 'DomainController', 'Normal')][string]$ServerType = 'Auto',
     [ValidateSet('Migration', 'Deep')][string]$CheckLevel = 'Migration',
     [ValidateSet('Install', 'FirstbootManaged')][string]$DriverPreparation = 'Install',
@@ -36,6 +48,8 @@ param(
     [string]$StateDirectory = '',
     [string]$AdapterMappingPath = '',
     [switch]$FirstbootNotUsed,
+    [switch]$UseExtendedToolsCleanup = $true,
+    [ValidateSet('Automatic','Manual')][string]$ToolsCleanupMode='Automatic',
     [switch]$RepairOfflineDisks,
     [switch]$RemoveHiddenVMwareAdapters,
     [switch]$DisableVMwareTools = $true,
@@ -51,7 +65,10 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Migration.Common.ps1')
 . (Join-Path $PSScriptRoot 'Migration.Assessment.ps1')
 . (Join-Path $PSScriptRoot 'Migration.DirectImport.ps1')
+. (Join-Path $PSScriptRoot 'Migration.VMwareToolsCleanup.ps1')
 $script:PhaseExitCode = 0
+$script:RestartRequired = $false
+$script:Step3ApprovalDirectory = ''
 $script:InteractiveMenu = -not $Phase
 $script:LevelExplicit = $PSBoundParameters.ContainsKey('CheckLevel')
 $script:MethodExplicit = $PSBoundParameters.ContainsKey('MigrationMethod')
@@ -94,6 +111,11 @@ function Invoke-CheckedMigrationScript {
     param([string]$Name, [hashtable]$Arguments = @{}, [int[]]$WarningCodes = @(1))
     $code = Invoke-MigrationChildScript -Path (Join-Path $PSScriptRoot $Name) -Arguments $Arguments
     if ($code -eq 0) { return }
+    if ($Name -eq 'Restore-And-TestMigrationState.ps1' -and $code -eq 3010) {
+        $script:PhaseExitCode=1
+        $script:RestartRequired=$true
+        return
+    }
     if ($code -in $WarningCodes) {
         $script:PhaseExitCode = 1
         Write-Warning "$Name completed with warnings (exit $code). Review its report."
@@ -126,6 +148,16 @@ function Write-MigrationCaptureSummary {
 }
 
 try {
+    if ($LegacyToolsCleanup) {
+        $allowed=@('LegacyToolsCleanup','WhatIf','Confirm','Verbose','Debug','ErrorAction','ErrorVariable','WarningAction','WarningVariable','InformationAction','InformationVariable','OutVariable','OutBuffer','PipelineVariable')
+        $other=@($PSBoundParameters.Keys|Where-Object {$_ -notin $allowed})
+        if ($other.Count) { throw "-LegacyToolsCleanup is a separate action and cannot be combined with migration options: $($other -join ', ')." }
+        if (-not $WhatIfPreference -and -not $PSCmdlet.ShouldProcess($env:COMPUTERNAME,'Back up and remove verified stopped Tools services and Tools startup values; preserve MSI, COM+, files, drivers and network')) { exit 1 }
+        $legacyArgs=@{Confirm=$false}
+        if ($WhatIfPreference) { $legacyArgs.WhatIf=$true }
+        Invoke-CheckedMigrationScript 'Invoke-LegacyToolsCleanup.ps1' $legacyArgs
+        exit $script:PhaseExitCode
+    }
     if (-not $Phase) {
         Write-Host '1) ReadinessCheck  2) Prepare  3) ValidatePost  4) Exit'
         switch (Read-Host 'Select phase') {
@@ -220,11 +252,37 @@ try {
             if ((Get-MigrationProperty $firstboot 'completionEvidence' '') -eq 'VerifiedIdleUninstalledRunner') {
                 Write-Host 'Firstboot work is complete; the uninstalled runner is verified idle. No additional restart is needed for the Firstboot gate.'
             }
-            if (-not $WhatIfPreference -and -not $PSCmdlet.ShouldProcess($env:COMPUTERNAME, 'Restore captured network settings, uninstall remaining VMware Tools (including backed-up service cleanup if MSI fails) on the verified target, and validate after Firstboot')) {
-                $script:PhaseExitCode = 1
-                break
+            $ToolsCleanupMode=Resolve-MigrationToolsCleanupChoice -StateDirectory $selectedState -Mode $ToolsCleanupMode -Explicit:($PSBoundParameters.ContainsKey('ToolsCleanupMode')) -Interactive:$script:InteractiveMenu
+            Write-Host "VMware Tools cleanup: $ToolsCleanupMode"
+            $toolsAction=if ($ToolsCleanupMode -eq 'Manual') {'leave VMware Tools unchanged for manual handling'} else {'run the selected VMware Tools cleanup (manual restarts may be required)'}
+            $approvalContext=$null;$resumeApproved=$false
+            if (-not $WhatIfPreference) {
+                $script:Step3ApprovalDirectory=$selectedState
+                $approvalOptions=[ordered]@{MigrationMethod=$MigrationMethod;CheckLevel=$CheckLevel;ToolsCleanupMode=$ToolsCleanupMode;
+                    UseExtendedToolsCleanup=[bool]$UseExtendedToolsCleanup;AdapterMappingPath=$AdapterMappingPath;FirstbootNotUsed=[bool]$FirstbootNotUsed;
+                    RepairOfflineDisks=[bool]$RepairOfflineDisks;RemoveHiddenVMwareAdapters=[bool]$RemoveHiddenVMwareAdapters;
+                    DeepScan=[bool]$DeepScan;DnsTestHost=$DnsTestHost;ApplicationConfigPath=$ApplicationConfigPath;
+                    MigrationTimestamp=$(if($PSBoundParameters.ContainsKey('MigrationTimestamp')){$MigrationTimestamp.ToUniversalTime().ToString('o')}else{''})}
+                try { $approvalContext=Get-MigrationStep3ApprovalContext -StateDirectory $selectedState -Options $approvalOptions -ScriptDirectory $PSScriptRoot }
+                catch { Write-Warning "Continuation approval could not be verified; a fresh confirmation will be used. $($_.Exception.Message)" }
+                if (-not $PSBoundParameters.ContainsKey('Confirm')) { $resumeApproved=Test-MigrationStep3Approval -StateDirectory $selectedState -Context $approvalContext }
+                if ($resumeApproved) {
+                    Write-Host 'Resuming the approved step 3 workflow. VM, capture, target adapters, scripts and options still match; live network settings will be rechecked.'
+                } else {
+                    Clear-MigrationStep3Approval $selectedState
+                    if (-not $PSCmdlet.ShouldProcess($env:COMPUTERNAME, "Restore captured network settings, $toolsAction on the verified target, and validate after Firstboot; approve planned restart continuations for this same VM/capture/options")) {
+                        $script:PhaseExitCode=1
+                        break
+                    }
+                    try { Save-MigrationStep3Approval -StateDirectory $selectedState -Context $approvalContext }
+                    catch { Write-Warning "Approval could not be saved; future continuations will ask again. $($_.Exception.Message)" }
+                }
             }
-            $restoreArgs = @{ Mode = 'Full'; StateDirectory = $selectedState; Confirm = $false; CheckLevel=$CheckLevel }
+            if ($ToolsCleanupMode -eq 'Automatic' -and $UseExtendedToolsCleanup) { Write-Warning 'DEVELOPMENT BRANCH: package-inspected VMware Tools cleanup is enabled. Known MSI action layouts are verified before modification; unknown layouts require manual handling.' }
+            $restoreArgs = @{ Mode = 'Full'; StateDirectory = $selectedState; Confirm = $false; CheckLevel=$CheckLevel; ToolsCleanupMode=$ToolsCleanupMode }
+            $restoreArgs.RestartBannerHandledByCaller=$true
+            if ($resumeApproved) { $restoreArgs.ResumeApproved=$true }
+            if ($UseExtendedToolsCleanup) { $restoreArgs.UseExtendedToolsCleanup = $true }
             if ($MigrationMethod -eq 'DirectImport') { $restoreArgs.MigrationMethod = 'DirectImport' }
             if ($AdapterMappingPath) { $restoreArgs.AdapterMappingPath = $AdapterMappingPath }
             if ($FirstbootNotUsed) { $restoreArgs.FirstbootNotUsed = $true }
@@ -236,13 +294,18 @@ try {
             if ($PSBoundParameters.ContainsKey('MigrationTimestamp')) { $restoreArgs.MigrationTimestamp = $MigrationTimestamp.ToString('o') }
             if ($WhatIfPreference) { $restoreArgs.WhatIf = $true }
             Invoke-CheckedMigrationScript 'Restore-And-TestMigrationState.ps1' $restoreArgs
+            if (-not $WhatIfPreference -and -not $script:RestartRequired) { Clear-MigrationStep3Approval $selectedState }
         }
     }
     if ($WhatIfPreference) { Write-Host "$Phase preview completed; no preparation or restoration was applied." }
+    elseif ($script:RestartRequired) { Write-MigrationRestartInstructions }
     elseif ($script:PhaseExitCode -eq 0) { Write-Host "$Phase completed successfully." }
     else { Write-Warning "$Phase completed with warnings. Review the reports before approving the migration." }
     exit $script:PhaseExitCode
 } catch {
+    if (-not $WhatIfPreference -and $script:Step3ApprovalDirectory) {
+        try { Clear-MigrationStep3Approval $script:Step3ApprovalDirectory } catch { Write-Warning 'Could not remove continuation approval; review Step3Approval.json.' }
+    }
     if ($Phase -eq 'Prepare') {
         Write-Host '========== PREPARE STOPPED ==========' -ForegroundColor Red
         Write-Host 'Preparation did not complete. Review the failure below before backup or migration.' -ForegroundColor Red

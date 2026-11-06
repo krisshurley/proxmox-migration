@@ -5,6 +5,8 @@ Set-StrictMode -Version 2.0
 $root=Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'Migration.Common.ps1')
 . (Join-Path $root 'Migration.Assessment.ps1')
+. (Join-Path $root 'Migration.VMwareToolsCleanup.ps1')
+$script:InteractiveMenu=$false
 $temp=Join-Path ([IO.Path]::GetTempPath()) ('assessment-tests-'+[guid]::NewGuid().ToString('N'))
 $null=New-Item -ItemType Directory $temp
 $passed=0

@@ -9,6 +9,13 @@ $script:Failures = 0
 $script:Passed = 0
 $script:TempRoot = Join-Path ([IO.Path]::GetTempPath()) ('migration-tests-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $script:TempRoot | Out-Null
+# Fixtures for the legacy Full cleanup route; extended workflow has its own suite.
+$script:StateDirectory = Join-Path $script:TempRoot 'LegacyCapture'
+$script:UseExtendedToolsCleanup = $false
+$script:ReportPhase = 'Final'
+$script:ToolsRestartPending = $false
+$script:ToolsCleanupMode = 'Automatic'
+$script:ResumeApproved = $false
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -99,11 +106,12 @@ function Invoke-ObsoleteRouteFixture {
         [switch]$NoOldRoute, [switch]$UnrelatedRoute, [switch]$HostRoute, [switch]$SharedPrefix,
         [switch]$RemovalFailure, [switch]$DuplicateReplacement, [switch]$NoNetworkApply, [switch]$RetiredRegistry,
         [switch]$RegistryGuidMismatch, [switch]$RegistryAliasMismatch, [switch]$LiveOldAdapter,
-        [switch]$RegistryUnavailable, [switch]$UnrelatedFailure, [switch]$RegistryChanges)
+        [switch]$RegistryUnavailable, [switch]$UnrelatedFailure, [switch]$RegistryChanges, [switch]$LiveNetworkVerified)
     $Mode=$FixtureMode
     $destination=if ($HostRoute) {'192.0.2.108/32'} else {'0.0.0.0/0'}
     $script:CleanupRemoved=@();$script:CleanupOrder='';$script:CleanupBackup=''
     $script:NetworkChanged=-not $NoNetworkApply
+    $script:NetworkVerifiedLive=[bool]$LiveNetworkVerified
     $script:NetworkComparisonComplete=-not $ComparisonIncomplete
     $script:NetworkComparisonPassed=-not $ValidationFailed
     $script:Results=New-Object System.Collections.ArrayList
@@ -855,6 +863,15 @@ try {
         $json=Get-Content -LiteralPath $ReportJsonPath -Raw | ConvertFrom-Json
         Assert-True ($summary.overallStatus -eq 'PASS' -and @($json.results).Count -eq 1 -and $json.results[0].details.Count -eq 2) 'JSON report lost structured results.'
         Assert-True ((Test-Path $ReportHtmlPath) -and (Test-Path $ReportTextPath)) 'Human-readable reports were not written.'
+        $script:ReportPhase='IntermediateRestartRequired'
+        try {
+            $null=Write-Reports
+            $json=Get-Content -LiteralPath $ReportJsonPath -Raw|ConvertFrom-Json
+            Assert-True ($json.summary.reportPhase -eq 'IntermediateRestartRequired' -and $null -eq $json.summary.operationalAssessmentPath) 'Intermediate report claims completed evidence'
+            Assert-True ((Get-Content $ReportHtmlPath -Raw) -match 'Deferred until cleanup restart checkpoints') 'HTML hides deferred validation'
+            Assert-True ((Get-Content $ReportTextPath -Raw) -match 'IntermediateRestartRequired') 'Text hides intermediate status'
+        } finally { $script:ReportPhase='Final' }
+
     }
     Test-Case 'Unavailable route providers are not mistaken for an empty route set' {
         function Get-NetRoute { param($AddressFamily,$PolicyStore) throw 'Provider unavailable' }
@@ -1604,6 +1621,14 @@ try {
     Test-Case 'Host routes and identical prefixes on different sources use GUID ownership' {
         Invoke-ObsoleteRouteFixture -HostRoute -SharedPrefix
         Assert-True ($script:CleanupRemoved.Count -eq 1 -and @($script:Results | Where-Object state -eq 'WARNING').Count -eq 0) 'Shared prefix ownership was guessed or generated a false warning.'
+    }
+    Test-Case 'Fresh matching live network allows guarded obsolete-route cleanup without network writes' {
+        Invoke-ObsoleteRouteFixture -NoNetworkApply -LiveNetworkVerified
+        Assert-True ($script:CleanupRemoved.Count -eq 1 -and $script:CleanupOrder -match '^backup') 'Live verification did not permit backed-up cleanup'
+        Invoke-ObsoleteRouteFixture -NoNetworkApply -LiveNetworkVerified -ComparisonIncomplete
+        Assert-True ($script:CleanupRemoved.Count -eq 0) 'Missing network comparison allowed deletion'
+        Invoke-ObsoleteRouteFixture -NoNetworkApply -LiveNetworkVerified -WrongTargetIdentity
+        Assert-True ($script:CleanupRemoved.Count -eq 0) 'Wrong identity allowed deletion'
     }
     Test-Case 'Ambiguous replacement, unsuccessful apply and removal errors fail closed' {
         Invoke-ObsoleteRouteFixture -DuplicateReplacement

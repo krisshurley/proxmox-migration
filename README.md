@@ -1,5 +1,8 @@
 # VMware-to-Proxmox Migration Toolkit
 
+> **Development branch `dev`: experimental VMware Tools cleanup.** Steps 1 and 2 retain the existing preparation flow. The menu runner enables the new restart-aware step 3 workflow by default on this branch. It selects known MSI actions by inspecting the installed package rather than by a fixed Tools version number. Matching product identity and recognized action signatures are required; unknown layouts stop without modification. Read [VMwareToolsCleanup/README.md](VMwareToolsCleanup/README.md) before testing. No Microsoft troubleshooting package is included or invoked. The preceding combined workflow was exercised on Tools 13.0.10; the new package-inspected selection still needs Windows testing, particularly on other versions. To start a new test with the previous cleanup path, use `-UseExtendedToolsCleanup:$false`; an existing extended workflow must be completed/reviewed rather than bypassed.
+
+
 > **Alternative workflow branch: `codex/direct-esxi-import`.** Use `main` for the
 > established Veeam/Firstboot workflow. This branch adds direct Proxmox ESXi import
 > for continued testing. Prepare has completed on the Windows Server 2019 test VM;
@@ -814,6 +817,31 @@ mapping, the report. These do not change the numeric exit-code contract:
   `20` invalid input/identity/mapping, `40` network failure with successful rollback,
   `41` rollback failure, `99` execution/Firstboot-gate failure.
 - DC health: `0` healthy, `1` warnings, `2` unhealthy, `3` execution failure.
+
+## Limited cleanup of previously migrated guests
+
+A separate flag runs limited cleanup without opening the phase menu, reading an old
+capture or restoring network settings:
+
+```powershell
+.\Migrate-VmwareToProxmox.ps1 -LegacyToolsCleanup -WhatIf
+.\Migrate-VmwareToProxmox.ps1 -LegacyToolsCleanup
+```
+
+Use elevated 64-bit PowerShell on a QEMU/KVM guest with QEMU Guest Agent running and
+Firstboot complete. The operation backs up exact startup values and service keys before
+removing verified stopped Tools services and the exact machine-wide `VMware User Process`
+startup value (both registry views). It accepts already removed entries as a no-op.
+Running services, unexpected paths and COM+-managed VMVss remain for review. No user
+process is killed. MSI/Programs metadata, COM+, files, drivers, network and routes are
+preserved. This is limited cleanup, not a full uninstall; no automatic reboot occurs.
+
+`Invoke-LegacyToolsCleanup.ps1` implements the action. Reports/backups are written under
+`C:\temp\VMware-LegacyCleanup`; `-WhatIf` writes nothing. Exit 0 means complete within this
+limited scope, 1 means review/cancelled, 2 means stopped/failed. Partial actions are retained
+in failure evidence, not automatically rolled back. The flag cannot be combined with a
+migration phase or capture options. A Windows test on previously migrated guests is still
+required before broad use.
 
 ## Validation before production use
 
