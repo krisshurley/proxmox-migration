@@ -2,6 +2,8 @@
 [CmdletBinding()]param()
 Set-StrictMode -Version 2
 $ErrorActionPreference='Stop'
+function Resolve-MigrationOfflineDiskRepairChoice {param($StateDirectory,$Requested,[switch]$Explicit,[switch]$Interactive) [bool]$Requested}
+function Save-MigrationOfflineDiskChoice {param($StateDirectory,$Repair)}
 $root=Split-Path -Parent $PSScriptRoot
 . (Join-Path $root Migration.VMwareToolsCleanup.ps1)
 $count=0

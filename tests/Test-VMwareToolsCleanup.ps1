@@ -16,7 +16,7 @@ function Import-Functions([string]$File,[string[]]$Names){
     }
 }
 function Test-Case([string]$Name,[scriptblock]$Body){& $Body;$script:Passed++;Write-Host "PASS $Name"}
-Import-Functions 'Migration.VMwareToolsCleanup.ps1' @('Assert-VMwareCleanupIdentity','Convert-VMwareCleanupBootId','Get-VMwareCleanupPlan','Write-VMwareCleanupState','Read-VMwareCleanupSingleJson','Assert-VMwareResidualAudit')
+Import-Functions 'Migration.VMwareToolsCleanup.ps1' @('Assert-VMwareCleanupIdentity','Convert-VMwareCleanupBootId','Get-VMwareCleanupPlan','Write-VMwareCleanupState','Read-VMwareCleanupSingleJson','Assert-VMwareResidualAudit','Get-VMwareCleanupWorkerError')
 Import-Functions 'Migration.Common.ps1' @('Get-MigrationProperty')
 Import-Functions 'VMwareToolsCleanup/Invoke-MsiUninstall.ps1' @('Assert-MsiIdentity','Get-ValidatedActionPlan')
 Import-Functions 'VMwareToolsCleanup/Remove-Residuals.ps1' @('Test-CleanupDevice','Read-DeviceProperty')
@@ -173,7 +173,8 @@ $method=Get-MigrationCapturedMethod $StateDirectory
         [pscustomobject]@{state='Complete'}}
     function Get-CimInstance {param($ClassName,$ErrorAction) if($ClassName -eq 'Win32_OperatingSystem'){[pscustomobject]@{LastBootUpTime=$script:Boot}}else{[pscustomobject]@{Manufacturer='QEMU';Model='KVM'}}}
     function Get-Service {param($Name,$ErrorAction) [pscustomobject]@{Status='Running'}}
-    function Get-VMwareCleanupProducts {[pscustomobject]@{code='{AB3D2C12-464D-4520-8DF4-4011143F05F6}';version=$script:FixtureToolsVersion}}
+    $script:NoProduct=$false
+    function Get-VMwareCleanupProducts {if($script:NoProduct){return};[pscustomobject]@{code='{AB3D2C12-464D-4520-8DF4-4011143F05F6}';version=$script:FixtureToolsVersion}}
     $script:Calls=New-Object System.Collections.Generic.List[string]
     $script:FailWorker=$false;$script:FailVerification=$false
     function Invoke-MigrationChildScript {
@@ -263,6 +264,36 @@ $method=Get-MigrationCapturedMethod $StateDirectory
         Assert-True ((Get-FileHash $path).Hash -eq $hash) 'Foreign state was rewritten.'
         Assert-True ($script:Calls.Count -eq $count) 'Worker launched for foreign state.'
         $script:FixtureIdentity.machineGuid='MACHINE'
+    }
+    foreach($method in @('VeeamFirstboot','DirectImport')) {
+        Test-Case "${method}: already removed Tools enters residual cleanup without MSI" {
+            $script:FixtureMethod=$method;$script:NoProduct=$true
+            $folder=Join-Path $testRoot ('NoProduct-'+$method);New-Item -ItemType Directory $folder|Out-Null
+            $count=$script:Calls.Count
+            try {
+                $null=Run-Workflow $folder -Confirm:$false
+                $null=Run-Workflow $folder -Confirm:$false
+                $path=Join-Path $folder 'VMwareToolsCleanup/Workflow.json'
+                Assert-True ((Get-Content $path -Raw|ConvertFrom-Json).stage -eq 'AwaitingResidualReboot') 'Residual-only restart checkpoint missing'
+                $script:Boot=$script:Boot.AddHours(1);$null=Run-Workflow $folder -Confirm:$false
+                Assert-True ((Get-Content $path -Raw|ConvertFrom-Json).stage -eq 'Complete') 'Residual-only flow did not complete'
+                Assert-True ((@($script:Calls|Select-Object -Skip $count) -join ',') -eq 'Residual-Cleanup,Residual-Audit,Verify') 'Residual-only flow ran MSI or repeated cleanup'
+            } finally {$script:NoProduct=$false;$script:FixtureMethod='VeeamFirstboot'}
+        }
+        Test-Case "${method}: old read-only verification failure can recover, completed state cannot reclean" {
+            $script:FixtureMethod=$method;$script:NoProduct=$true
+            $folder=Join-Path $testRoot ('OldVerify-'+$method);$dir=Join-Path $folder 'VMwareToolsCleanup';New-Item -ItemType Directory $dir -Force|Out-Null
+            $path=Join-Path $dir 'Workflow.json'
+            $state=[pscustomobject]@{schemaVersion=1;identity=$script:FixtureIdentity;stage='VerificationFailed';boot=$script:Boot.ToUniversalTime().ToString('o');updatedUtc='';product=@();msiModified=$false;guestHandlerRestoreSkipped=$false;msiRun='';residualRun='';verificationRun='';lastError='Residual audit failed (exit 99).';limitations=@()}
+            Write-VMwareCleanupState $path $state
+            try {
+                $count=$script:Calls.Count;$null=Run-Workflow $folder -Confirm:$false
+                Assert-True ((@($script:Calls|Select-Object -Skip $count) -join ',') -eq 'Residual-Cleanup') 'Old verification did not enter residual-only path'
+                $script:Boot=$script:Boot.AddHours(1);$null=Run-Workflow $folder -Confirm:$false
+                $count=$script:Calls.Count;$null=Run-Workflow $folder -Confirm:$false
+                Assert-True ((@($script:Calls|Select-Object -Skip $count) -join ',') -eq 'Residual-Audit,Verify') 'Completed cleanup was repeated'
+            } finally {$script:NoProduct=$false;$script:FixtureMethod='VeeamFirstboot'}
+        }
     }
     Test-Case 'Worker failure persists Failed and prevents repeated MSI changes' {
         $failedDir=Join-Path $testRoot 'FailedState';New-Item -ItemType Directory $failedDir|Out-Null

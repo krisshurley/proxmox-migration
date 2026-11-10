@@ -817,8 +817,11 @@ try {
         Assert-True ($script:Results[0].state -eq 'FAIL') 'Failed service change was not recorded.'
     }
     Test-Case 'WhatIf disk repair does not invoke Set-Disk or diskpart' {
+        . (Join-Path $script:RepositoryRoot 'Migration.Disks.ps1')
+        function Get-CimInstance { [pscustomobject]@{Manufacturer='QEMU';Model='KVM'} }
+        $script:PreState=[pscustomobject]@{disks=@();partitionsAndVolumes=@()}
         $script:RepairOfflineDisks=$true
-        function Get-Disk { [pscustomobject]@{Number=1;FriendlyName='Data';Size=1GB;IsOffline=$true;IsReadOnly=$false} }
+        function Get-Disk { [pscustomobject]@{Number=1;FriendlyName='Data';Size=1GB;PartitionStyle='GPT';IsOffline=$true;IsReadOnly=$false} }
         function Set-Disk { throw 'Unexpected disk mutation' }
         function Invoke-DiskpartOnline { throw 'Unexpected native disk mutation' }
         Repair-OfflineDisks -WhatIf

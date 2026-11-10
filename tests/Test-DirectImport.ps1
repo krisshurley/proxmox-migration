@@ -4,6 +4,8 @@
 param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+function Resolve-MigrationOfflineDiskRepairChoice {param($StateDirectory,$Requested,[switch]$Explicit,[switch]$Interactive) [bool]$Requested}
+function Save-MigrationOfflineDiskChoice {param($StateDirectory,$Repair)}
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'Migration.Common.ps1')
 . (Join-Path $root 'Migration.DirectImport.ps1')

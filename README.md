@@ -877,3 +877,9 @@ actual supported Windows releases, including Firstboot, driver bootability,
 static/DHCP networking, extra routes, error/rollback paths, applications and DC
 health where applicable. Firstboot service/file layouts may differ by restore
 version; an unknown layout stops rather than bypasses the gate.
+
+### Development updates: conversion leftovers and offline data disks
+
+On `dev`, step 3 also handles the case where conversion already removed Tools: verified residual cleanup, a restart and final verification, without rerunning MSI. Verified Windows inbox PVSCSI is preserved separately; unknown ownership is blocked. Worker exceptions are saved with their actual error details under the capture's `VMwareToolsCleanup` directory.
+
+The step-3 menu offers to bring uniquely matched captured offline data disks online (`[y/N]`, default No). The affirmative choice is remembered during restart continuations; current identity/uniqueness is still rechecked before each change. CLI remains opt-in with `-RepairOfflineDisks`. New captures include GPT GUID/MBR signature; indistinguishable disks from old captures remain manual. See [operator guide](ANVANDARGUIDE.md) and [workflow details](VMwareToolsCleanup/README.md).

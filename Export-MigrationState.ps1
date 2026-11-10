@@ -365,6 +365,8 @@ function Get-DiskState {
             friendlyName = $_.FriendlyName
             serialNumber = $_.SerialNumber
             uniqueId = $_.UniqueId
+            diskGuid = [string](Get-MigrationProperty $_ 'Guid' '')
+            diskSignature = [string](Get-MigrationProperty $_ 'Signature' '')
             busType = $_.BusType.ToString()
             partitionStyle = $_.PartitionStyle.ToString()
             sizeBytes = [int64]$_.Size

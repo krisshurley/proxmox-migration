@@ -32,6 +32,10 @@
     Enabled by default in Prepare to preserve the original migration workflow.
     Captures original service state before stopping/disabling Tools on the source.
     Use -DisableVMwareTools:$false to keep source services unchanged.
+.PARAMETER RepairOfflineDisks
+    Opt in to clearing read-only/bringing online uniquely matched captured data disks.
+    The interactive step 3 menu offers this with default No and remembers the
+    choice across restart continuations. Ambiguous/foreign/system disks are excluded.
 .PARAMETER CheckLevel
     Migration (default) collects bounded local evidence. Deep adds diagnostics
     for this server only. Prepare saves the level with State; ValidatePost reuses it.
@@ -63,6 +67,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Migration.Common.ps1')
+. (Join-Path $PSScriptRoot 'Migration.Disks.ps1')
 . (Join-Path $PSScriptRoot 'Migration.Assessment.ps1')
 . (Join-Path $PSScriptRoot 'Migration.DirectImport.ps1')
 . (Join-Path $PSScriptRoot 'Migration.VMwareToolsCleanup.ps1')
@@ -255,6 +260,11 @@ try {
             $ToolsCleanupMode=Resolve-MigrationToolsCleanupChoice -StateDirectory $selectedState -Mode $ToolsCleanupMode -Explicit:($PSBoundParameters.ContainsKey('ToolsCleanupMode')) -Interactive:$script:InteractiveMenu
             Write-Host "VMware Tools cleanup: $ToolsCleanupMode"
             $toolsAction=if ($ToolsCleanupMode -eq 'Manual') {'leave VMware Tools unchanged for manual handling'} else {'run the selected VMware Tools cleanup (manual restarts may be required)'}
+            if (-not $WhatIfPreference) {
+                $script:Step3ApprovalDirectory=$selectedState
+                $RepairOfflineDisks=Resolve-MigrationOfflineDiskRepairChoice -StateDirectory $selectedState -Requested:([bool]$RepairOfflineDisks) -Explicit:($PSBoundParameters.ContainsKey('RepairOfflineDisks')) -Interactive:$script:InteractiveMenu
+            }
+            $diskAction=if($RepairOfflineDisks){'bring uniquely matched captured offline data disks online, '}else{''}
             $approvalContext=$null;$resumeApproved=$false
             if (-not $WhatIfPreference) {
                 $script:Step3ApprovalDirectory=$selectedState
@@ -270,7 +280,7 @@ try {
                     Write-Host 'Resuming the approved step 3 workflow. VM, capture, target adapters, scripts and options still match; live network settings will be rechecked.'
                 } else {
                     Clear-MigrationStep3Approval $selectedState
-                    if (-not $PSCmdlet.ShouldProcess($env:COMPUTERNAME, "Restore captured network settings, $toolsAction on the verified target, and validate after Firstboot; approve planned restart continuations for this same VM/capture/options")) {
+                    if (-not $PSCmdlet.ShouldProcess($env:COMPUTERNAME, "Restore captured network settings, $diskAction$toolsAction on the verified target, and validate after Firstboot; approve planned restart continuations for this same VM/capture/options")) {
                         $script:PhaseExitCode=1
                         break
                     }
@@ -278,6 +288,7 @@ try {
                     catch { Write-Warning "Approval could not be saved; future continuations will ask again. $($_.Exception.Message)" }
                 }
             }
+            if (-not $WhatIfPreference) { Save-MigrationOfflineDiskChoice -StateDirectory $selectedState -Repair:([bool]$RepairOfflineDisks) }
             if ($ToolsCleanupMode -eq 'Automatic' -and $UseExtendedToolsCleanup) { Write-Warning 'DEVELOPMENT BRANCH: package-inspected VMware Tools cleanup is enabled. Known MSI action layouts are verified before modification; unknown layouts require manual handling.' }
             $restoreArgs = @{ Mode = 'Full'; StateDirectory = $selectedState; Confirm = $false; CheckLevel=$CheckLevel; ToolsCleanupMode=$ToolsCleanupMode }
             $restoreArgs.RestartBannerHandledByCaller=$true

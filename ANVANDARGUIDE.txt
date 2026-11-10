@@ -45,6 +45,15 @@ exitkod 3010; huvudmenyn visar omstartsrutan och lämnar varningskod 1. Övriga 
 behåller sina felkoder.
 
 
+> Om Firstboot redan har avinstallerat VMware Tools kör den utökade städningen enbart
+verifierad reststädning, normalt följd av en omstart och slutkontroll. En äldre
+VerificationFailed från den tidigare kontrollgrenen får återgå till reststädning endast
+om ingen MSI- eller reststädningskörning har startat och ingen Tools-produkt är
+registrerad. Avbrutna eller misslyckade ändringar återförs inte automatiskt. Verifierad
+Windows-medföljande PVSCSI (pvscsii.sys) bevaras och redovisas separat. Oklart ägarskap
+stoppar hanteringen; filnamnet ensamt räcker inte. Fel från underscript sparas som
+*-error-*.json under exportens State\VMwareToolsCleanup\.
+
 > Första bekräftelsen i steg 3 omfattar även de två planerade omstartsfortsättningarna.
 Efter omstart väljer du bara 3 igen. Step3Approval.json sparas vid den valda exporten
 och återanvänds endast när samma VM (MachineGuid/SMBIOS-UUID), export, aktuella
@@ -61,6 +70,21 @@ skapar eller ändrar ingen sparad bekräftelse. Om identiteten inte kan verifier
 filen inte kan sparas används vanlig bekräftelse även vid nästa fortsättning.
 Omstartsrutan visas en gång via menyn; den visas också vid fristående återställning.
 
+
+> När steg 3 hittar offline-diskar visar menyn vilka som kan matchas entydigt mot
+exporterade datadiskar och frågar Bring the verified offline data disks online? [y/N].
+Enter lämnar dem offline. Vid y säkerhetskopieras diskstatus innan skrivskydd tas bort
+och diskarna sätts online. Valet återanvänds under samma omstartsflöde och tas bort när
+körningen slutförs, avböjs eller får ett hanterat fel. Diskarnas identitet och matchning
+kontrolleras på nytt före ändring. Boot-/systemdiskar, omatchade, tvetydiga och ej
+friska diskar hanteras manuellt. Ingen disk initieras eller formateras, inga
+enhetsbokstäver ändras och inga applikationstjänster startas automatiskt. CLI kräver
+fortsatt uttrycklig -RepairOfflineDisks; även den flaggan följer samma avgränsning.
+
+> Nya exporter sparar GPT-disk-GUID/MBR-signatur. Äldre exporter stöds med bevarad
+diskidentitet eller ett unikt partitionsupplägg. Två lika stora diskar med identiska
+upplägg kan därför lämnas för manuell hantering när den gamla exporten saknar en entydig
+identitet.
 
 > Mellankörningarna gäller både Veeam/Firstboot och Proxmox ESXi-import: när städningen
 väntar på omstart sparas en delrapport märkt IntermediateRestartRequired. Nätverket

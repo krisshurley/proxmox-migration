@@ -64,6 +64,44 @@ function Test-CleanupDevice {
         $Device.Id -match '^ACPI\\VMW0003\\' -or
         $Device.Id -match '^SCSI\\(DISK&VEN_VMWARE&PROD_VIRTUAL_DISK|CDROM&VEN_NECVMWAR&PROD_VMWARE_SATA_CD00)\\')
 }
+function Get-PreservedInboxDriver {
+    param($Driver)
+    if ($Driver.Name -ine 'pvscsi' -or $Driver.PathName -ine "$env:windir\System32\drivers\pvscsii.sys") { return $null }
+    $inf=Join-Path $env:windir 'INF\pvscsii.inf'
+    $binary=[string]$Driver.PathName
+    if (-not (Test-Path -LiteralPath $inf -PathType Leaf) -or -not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+        throw 'Windows inbox PVSCSI evidence is incomplete; no driver removal is authorized.'
+    }
+    $text=Get-Content -LiteralPath $inf -Raw -ErrorAction Stop
+    if ($text -notmatch '(?im)^\s*AddService\s*=\s*pvscsi\s*,' -or $text -notmatch '(?im)^\s*ServiceBinary\s*=\s*%12%\\pvscsii\.sys\s*(?:;.*)?$') {
+        throw 'Windows inbox PVSCSI INF does not match the service/binary; review manually.'
+    }
+    $hash=(Get-FileHash -LiteralPath $inf -Algorithm SHA256 -ErrorAction Stop).Hash
+    $binaryHash=(Get-FileHash -LiteralPath $binary -Algorithm SHA256 -ErrorAction Stop).Hash
+    $stores=@(Get-ChildItem (Join-Path $env:windir 'System32\DriverStore\FileRepository') -Directory -Filter 'pvscsii.inf_*' -ErrorAction Stop | Where-Object {
+        $storeInf=Join-Path $_.FullName 'pvscsii.inf';$storeBinary=Join-Path $_.FullName 'pvscsii.sys'
+        (Test-Path -LiteralPath $storeInf -PathType Leaf) -and (Test-Path -LiteralPath $storeBinary -PathType Leaf) -and
+        (Get-FileHash -LiteralPath $storeInf -Algorithm SHA256 -ErrorAction Stop).Hash -eq $hash -and
+        (Get-FileHash -LiteralPath $storeBinary -Algorithm SHA256 -ErrorAction Stop).Hash -eq $binaryHash
+    })
+    if (-not $stores.Count) { throw 'Windows inbox PVSCSI files could not be matched to DriverStore; review manually.' }
+    $signature=Get-AuthenticodeSignature -LiteralPath $binary -ErrorAction Stop
+    if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation(?:,|$)') {
+        throw 'Windows inbox PVSCSI signature could not be verified; review manually.'
+    }
+    [pscustomobject]@{Name=[string]$Driver.Name;State=[string]$Driver.State;StartMode=[string]$Driver.StartMode;PathName=$binary;Reason='Verified Windows inbox PVSCSI: preserved, not a Tools remnant';InfHash=$hash;BinaryHash=$binaryHash}
+}
+function Assert-PreservedInboxDrivers {
+    foreach($saved in $script:preservedDrivers) {
+        $current=@(Get-CimInstance Win32_SystemDriver -Filter "Name='$($saved.Name)'" -ErrorAction Stop)
+        if ($current.Count -ne 1 -or $current[0].PathName -ine $saved.PathName -or
+            $current[0].StartMode -ne $saved.StartMode) { throw 'Preserved Windows inbox driver registration changed. Review the saved registry backup.' }
+        $proof=Get-PreservedInboxDriver $current[0]
+        if ($null -eq $proof -or $proof.InfHash -ne $saved.InfHash -or $proof.BinaryHash -ne $saved.BinaryHash) {
+            throw 'Preserved Windows inbox driver files changed. Review the saved evidence.'
+        }
+    }
+}
 function Get-VerifiedDriverFile {
     param($Driver,[object[]]$Packages)
     $files=@{vmci='vmci.sys';vmmouse='vmmouse.sys';vmusbmouse='vmusbmouse.sys';vmxnet3ndis6='vmxnet3.sys';VMMemCtl='vmmemctl.sys';pvscsi='pvscsi.sys'}
@@ -100,6 +138,8 @@ function New-InventoryReport {
     [pscustomobject]@{
         Computer=[string]$env:COMPUTERNAME
         Mode=[string]$Mode
+        EligibleDeviceCount=@($script:devices|Where-Object { Test-CleanupDevice $_ $script:packages }).Count
+        PreservedDrivers=@($script:preservedDrivers)
         Products=@(foreach($p in $script:products) {
             [pscustomobject]@{
                 DisplayName=(Get-ReportText $p 'DisplayName')
@@ -136,26 +176,34 @@ function Get-CleanupDeviceBindings {
     # On bulk-read failure retain the existing per-device fallback.
     $bindings=@{};$duplicates=@{}
     if (-not $Devices.Count) { return $bindings }
-    try {
-        $rows=@(Get-PnpDeviceProperty -InstanceId @($Devices|ForEach-Object InstanceId) -KeyName DEVPKEY_Device_DriverInfPath -ErrorAction Stop)
-        foreach ($row in $rows) {
-            if ($null -eq $row -or $null -eq $row.PSObject.Properties['InstanceId'] -or
-                $null -eq $row.PSObject.Properties['KeyName'] -or $row.KeyName -ne 'DEVPKEY_Device_DriverInfPath' -or
-                $null -eq $row.PSObject.Properties['Data'] -or $row.Data -isnot [string]) { continue }
-            $id=[string]$row.InstanceId
-            if ($bindings.ContainsKey($id)) { $duplicates[$id]=$true }
-            $bindings[$id]=[string]$row.Data
-        }
-        foreach ($id in $duplicates.Keys) { $bindings.Remove($id) }
-        # Missing/ambiguous bulk rows are retried individually by Inventory.
-        return $bindings
-    } catch { return @{} }
+    # Bound provider requests: large arrays can hit the PnP/WMI quota on busy guests.
+    for ($offset=0;$offset -lt $Devices.Count;$offset+=32) {
+        $last=[math]::Min($offset+31,$Devices.Count-1)
+        try {
+            $rows=@(Get-PnpDeviceProperty -InstanceId @($Devices[$offset..$last]|ForEach-Object InstanceId) -KeyName DEVPKEY_Device_DriverInfPath -ErrorAction Stop)
+            foreach ($row in $rows) {
+                if ($null -eq $row -or $null -eq $row.PSObject.Properties['InstanceId'] -or
+                    $null -eq $row.PSObject.Properties['KeyName'] -or $row.KeyName -ne 'DEVPKEY_Device_DriverInfPath' -or
+                    $null -eq $row.PSObject.Properties['Data'] -or $row.Data -isnot [string]) { continue }
+                $id=[string]$row.InstanceId
+                if ($bindings.ContainsKey($id)) { $duplicates[$id]=$true }
+                $bindings[$id]=[string]$row.Data
+            }
+        } catch { Write-Host 'PnP property batch unavailable; missing bindings will be retried individually.' }
+    }
+    foreach ($id in $duplicates.Keys) { $bindings.Remove($id) }
+    return $bindings
 }
 function Inventory {
     $script:services = @(Get-VerifiedVMwareServiceRemnants)
-    $script:drivers = @(Get-CimInstance Win32_SystemDriver | Where-Object {
+    $detectedDrivers = @(Get-CimInstance Win32_SystemDriver | Where-Object {
         $_.Name -in @('vmci','vmmouse','vmusbmouse','vmxnet3ndis6','VMMemCtl','pvscsi',
                       'vm3dmp','vm3dmp-debug','vm3dmp-stats','vm3dmp_loader')
+    })
+    $script:preservedDrivers=@()
+    $script:drivers=@(foreach($driver in $detectedDrivers) {
+        $preserved=Get-PreservedInboxDriver $driver
+        if ($null -ne $preserved) { $script:preservedDrivers+=@($preserved) } else { $driver }
     })
     # Match published INF bytes to a narrowly named VMware DriverStore INF.
     # Never rely on OEM numbers, which differ between machines.
@@ -190,6 +238,7 @@ function Inventory {
     $script:products = @(Products)
     $eligible=@($script:devices | Where-Object { Test-CleanupDevice $_ $script:packages })
     Write-Host ("VMware inventory: {0} devices eligible for review, {1} driver packages, {2} driver registrations, {3} services. Full inventory: {4}" -f $eligible.Count,$script:packages.Count,$script:drivers.Count,$script:services.Count,(Join-Path $run 'inventory.json'))
+    foreach($preserved in $script:preservedDrivers) { Write-Host ("Preserved Windows inbox driver: {0}; {1}" -f $preserved.Name,$preserved.PathName) }
     New-InventoryReport | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $run 'inventory.json') -Encoding UTF8
 }
 function Get-MigrationComServiceApplications {
@@ -312,6 +361,7 @@ try {
             $name = if ($s.PSObject.Properties['name']) { $s.name } else { $s.Name }
             Backup-Service $name
         }
+        foreach($saved in $script:preservedDrivers) { Backup-Service $saved.Name }
         foreach ($p in $script:packages) {
             $destination = Join-Path $run $p.Published
             New-Item -ItemType Directory $destination | Out-Null
@@ -368,6 +418,7 @@ public static class VMwareAbsentDevice {
         foreach ($p in $script:packages) {
             # Deliberately omit /force and /uninstall. In-use packages must fail.
             Native pnputil.exe @('/delete-driver',$p.Published)
+            Assert-PreservedInboxDrivers
         }
         foreach ($s in @($script:services | Where-Object comApplication)) {
             $apps=$catalog.GetCollection('Applications'); $apps.Populate()
@@ -422,6 +473,7 @@ public static class VMwareAbsentDevice {
                 }
             }
         }
+        Assert-PreservedInboxDrivers
         Write-Host 'CLEANUP PASS FINISHED. Reboot and run Audit. This is component cleanup, not proof of a complete MSI uninstall.'
     }
     Write-Host "Evidence and backups: $run"

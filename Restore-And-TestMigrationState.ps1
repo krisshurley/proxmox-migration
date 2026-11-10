@@ -81,6 +81,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Migration.Common.ps1')
+. (Join-Path $PSScriptRoot 'Migration.Disks.ps1')
 . (Join-Path $PSScriptRoot 'Migration.Assessment.ps1')
 . (Join-Path $PSScriptRoot 'Migration.DirectImport.ps1')
 . (Join-Path $PSScriptRoot 'Migration.VMwareToolsCleanup.ps1')
@@ -120,7 +121,7 @@ $ReportHtmlPath = Join-Path $ReportDirectory 'PostMigrationReport.html'
 $ReportTextPath = Join-Path $ReportDirectory 'PostMigrationReport.txt'
 $SchemaVersion = '1.0'
 # Fixed internal build stamp to verify which copy is deployed on a target machine.
-$CodeRevision = '2026-11-06.4'
+$CodeRevision = '2026-11-10.1'
 $script:LogWriter = $null
 $script:Results = New-Object System.Collections.ArrayList
 $script:Actions = New-Object System.Collections.ArrayList
@@ -404,45 +405,61 @@ function Invoke-DiskpartOnline {
     finally { Remove-Item -Path $scriptPath -Force -ErrorAction SilentlyContinue }
 }
 function Repair-OfflineDisks {
-    # Data disks commonly come up Offline after a migration because of the Windows SAN policy; bring them
-    # back online so subsequent disk/volume comparisons see the real, expected state.
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
     param()
     $disks = @(Get-Disk -ErrorAction Stop)
     $offline = @($disks | Where-Object { $_ -and $_.IsOffline })
     $details = @($offline | ForEach-Object { "Disk $($_.Number): '$($_.FriendlyName)', sizeGB=$([math]::Round($_.Size / 1GB, 2)), readOnly=$($_.IsReadOnly)" })
-    if ($offline.Count -eq 0) { Add-Result 'Disk online state' 'PASS' 'All disks are online.'; return }
+    if (-not $offline.Count) { Add-Result 'Disk online state' 'PASS' 'All disks are online.'; return }
     if (-not $RepairOfflineDisks -or $Mode -notin @('ApplyNetwork', 'Full')) {
-        Add-Result 'Disk online state' 'WARNING' "$($offline.Count) disk(s) are offline. Review the disks, then use -RepairOfflineDisks with ApplyNetwork or Full to bring them online." $details
+        Add-Result 'Disk online state' 'WARNING' 'Offline disks were left unchanged. Use the menu choice or -RepairOfflineDisks to repair only uniquely matched captured data disks.' $details
         return
     }
-    $broughtOnline = @(); $failed = @(); $previewed = @()
-    foreach ($disk in $offline) {
-        if (-not $PSCmdlet.ShouldProcess("Disk $($disk.Number) ($($disk.FriendlyName))", 'Bring online')) { $previewed += $disk.Number; continue }
+    $computer=Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+    if ($computer.Manufacturer -notmatch 'QEMU|Red Hat' -and $computer.Model -notmatch 'QEMU|KVM') { throw 'Disk repair requires a verified QEMU/KVM guest.' }
+    $plan=@(Get-MigrationDiskRepairPlan $script:PreState $disks)
+    $skipped=@($plan|Where-Object {-not $_.eligible})
+    $broughtOnline=@();$failed=@();$previewed=@()
+    foreach($row in @($plan|Where-Object eligible)) {
+        $disk=$row.disk
+        if (-not $PSCmdlet.ShouldProcess("Disk $($disk.Number), captured data disk $($row.source.diskNumber)", 'Back up disk state, clear read-only and bring online')) { $previewed+=@($disk.Number);continue }
         try {
-            $method = 'Set-Disk'
+            # Re-enumerate the full set: reused indexes, new duplicate disks and
+            # changed identities must fail before Set-Disk or diskpart writes.
+            $fresh=@(Get-MigrationDiskRepairPlan $script:PreState @(Get-Disk -ErrorAction Stop)|Where-Object { $_.disk.Number -eq $disk.Number -and $_.eligible })
+            if ($fresh.Count -ne 1 -or ($fresh[0].identity|ConvertTo-Json -Compress) -cne ($row.identity|ConvertTo-Json -Compress) -or $fresh[0].source.diskNumber -ne $row.source.diskNumber) {
+                throw 'Disk identity or unique source match changed; repair refused.'
+            }
+            $disk=$fresh[0].disk
+            $backup=Join-Path $RootPath ('DiskOnlineBefore-'+[guid]::NewGuid().ToString('N')+'.json')
+            [pscustomobject]@{identity=$row.identity;sourceDiskNumber=$row.source.diskNumber;isOffline=[bool]$disk.IsOffline;isReadOnly=[bool]$disk.IsReadOnly}|
+                ConvertTo-Json -Depth 4|Set-Content -LiteralPath $backup -Encoding UTF8 -ErrorAction Stop
+            $method='Set-Disk'
             try {
                 if ($disk.IsReadOnly) { Set-Disk -Number $disk.Number -IsReadOnly $false -Confirm:$false -ErrorAction Stop }
+                $now=Get-Disk -Number $disk.Number -ErrorAction Stop
+                if ((Get-MigrationDiskIdentity $now|ConvertTo-Json -Compress) -cne ($row.identity|ConvertTo-Json -Compress)) { throw 'Disk identity changed during repair.' }
                 Set-Disk -Number $disk.Number -IsOffline $false -Confirm:$false -ErrorAction Stop
             } catch {
-                $setDiskError = $_.Exception.Message
-                Invoke-DiskpartOnline -DiskNumber $disk.Number | Out-Null
-                $method = 'diskpart fallback after Set-Disk error: ' + $setDiskError
+                $setDiskError=$_.Exception.Message
+                $now=Get-Disk -Number $disk.Number -ErrorAction Stop
+                if ((Get-MigrationDiskIdentity $now|ConvertTo-Json -Compress) -cne ($row.identity|ConvertTo-Json -Compress)) { throw 'Disk identity changed; diskpart fallback refused.' }
+                Invoke-DiskpartOnline -DiskNumber $disk.Number|Out-Null
+                $method='diskpart fallback after: '+$setDiskError
             }
-            $updatedDisk = Get-Disk -Number $disk.Number -ErrorAction Stop
-            if ($updatedDisk.IsOffline) { throw 'The disk remained offline after the requested operation.' }
-            $broughtOnline += $disk.Number
-            Add-Action 'Disk online state' 'APPLIED' "Brought disk $($disk.Number) ('$($disk.FriendlyName)') online using $method."
+            $updated=Get-Disk -Number $disk.Number -ErrorAction Stop
+            if ((Get-MigrationDiskIdentity $updated|ConvertTo-Json -Compress) -cne ($row.identity|ConvertTo-Json -Compress) -or $updated.IsOffline -or $updated.IsReadOnly) { throw 'Disk repair result could not be verified.' }
+            $broughtOnline+=@($disk.Number)
+            Add-Action 'Disk online state' 'APPLIED' "Brought disk $($disk.Number) online using $method. Before-state: $backup"
         } catch {
-            $message = "Disk $($disk.Number): $($_.Exception.Message)"
-            $failed += $message
-            Add-Action 'Disk online state' 'FAILED' "Could not bring disk $($disk.Number) online: $($_.Exception.Message)"
-            Write-Log $message ([ConsoleColor]::Red)
+            $failed+=@("Disk $($disk.Number): $($_.Exception.Message)")
+            Add-Action 'Disk online state' 'FAILED' $failed[-1]
         }
     }
-    if ($failed.Count -gt 0) { Add-Result 'Disk online state' 'FAIL' "$($broughtOnline.Count) disk(s) brought online; $($failed.Count) disk(s) could not be brought online." ($details + $failed) }
-    elseif ($previewed.Count -gt 0 -and $broughtOnline.Count -eq 0) { Add-Result 'Disk online state' 'WARNING' "$($previewed.Count) offline disk(s) previewed with WhatIf; no changes were made." $details }
-    else { Add-Result 'Disk online state' 'PASS' "$($broughtOnline.Count) offline disk(s) were brought online." $details }
+    $blocked=@($skipped|ForEach-Object { "Disk $($_.disk.Number): $($_.reason)" })
+    if ($failed.Count) { Add-Result 'Disk online state' 'FAIL' "$($broughtOnline.Count) disk(s) brought online; repair failures require review." ($details+$blocked+$failed) }
+    elseif ($skipped.Count -or $previewed.Count) { Add-Result 'Disk online state' 'WARNING' "$($broughtOnline.Count) disk(s) brought online; unmatched/ambiguous or previewed disks were left unchanged." ($details+$blocked) }
+    else { Add-Result 'Disk online state' 'PASS' "$($broughtOnline.Count) uniquely matched data disk(s) brought online." $details }
 }
 function Get-TargetStaticRoutes {
     param([int]$InterfaceIndex)
@@ -1224,8 +1241,9 @@ function Invoke-PostMigrationToolsCleanup {
             return
         }
         try {
-            $exitCode=Invoke-MigrationChildScript (Join-Path $PSScriptRoot 'Invoke-VMwareToolsCleanup.ps1') @{StateDirectory=$StateDirectory;Confirm=$false}
-            if ($exitCode -notin @(0,1)) { throw "VMware Tools workflow failed (exit $exitCode). Review $workflowState and its worker logs." }
+            $workerError=Join-Path $StateDirectory ('VMwareToolsCleanup/worker-error-'+[guid]::NewGuid().ToString('N')+'.json')
+            $exitCode=Invoke-MigrationChildScript (Join-Path $PSScriptRoot 'Invoke-VMwareToolsCleanup.ps1') @{StateDirectory=$StateDirectory;Confirm=$false} -ErrorPath $workerError
+            if ($exitCode -notin @(0,1)) { throw (Get-VMwareCleanupWorkerError $workerError "VMware Tools workflow failed (exit $exitCode). Review $workflowState and its worker logs.") }
             if (-not (Test-Path -LiteralPath $workflowState)) { throw 'Cleanup worker did not produce workflow state.' }
             $cleanupState=Get-Content -LiteralPath $workflowState -Raw -ErrorAction Stop|ConvertFrom-Json
             if ($cleanupState.stage -in @('AwaitingMsiReboot','AwaitingResidualReboot')) {

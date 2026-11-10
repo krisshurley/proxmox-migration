@@ -432,16 +432,17 @@ function Get-MigrationEventErrors {
 }
 
 function Invoke-MigrationChildScript {
-    param([string]$Path, [hashtable]$Arguments = @{})
+    param([string]$Path, [hashtable]$Arguments = @{}, [string]$ErrorPath = '')
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Required script not found: $Path" }
     $engine = (Get-Process -Id $PID -ErrorAction Stop).Path
     # Windows PowerShell 5.1 -File cannot reliably transport explicit switch
     # booleans or array arguments. Serialize a splatted parameter dictionary instead.
     # Only base64 data is interpolated into the command; paths/values are never code.
-    $invocation = @{ Path = (Get-Item -LiteralPath $Path).FullName; Arguments = $Arguments }
+    $invocation = @{ Path = (Get-Item -LiteralPath $Path).FullName; Arguments = $Arguments; ErrorPath = $ErrorPath }
     $payload = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes([Management.Automation.PSSerializer]::Serialize($invocation)))
     $command = @'
 $ErrorActionPreference = 'Stop'
+$invocation = $null
 try {
     $invocation = [Management.Automation.PSSerializer]::Deserialize([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('__PAYLOAD__')))
     $parameters = $invocation.Arguments
@@ -449,7 +450,18 @@ try {
     & $invocation.Path @parameters
     exit ([int]$LASTEXITCODE)
 } catch {
-    Write-Error $_ -ErrorAction Continue
+    $failure=$_
+    if ($null -ne $invocation -and $invocation.ErrorPath) {
+        try {
+            $parent=Split-Path -Parent $invocation.ErrorPath
+            $null=New-Item -ItemType Directory -Path $parent -Force -ErrorAction Stop
+            [pscustomobject]@{script=$invocation.Path;message=$failure.Exception.Message;
+                errorId=$failure.FullyQualifiedErrorId;position=$failure.InvocationInfo.PositionMessage;
+                scriptStackTrace=$failure.ScriptStackTrace;details=($failure|Out-String)}|
+                ConvertTo-Json -Depth 4|Set-Content -LiteralPath $invocation.ErrorPath -Encoding UTF8 -ErrorAction Stop
+        } catch { Write-Warning 'Could not save child-process error details.' }
+    }
+    Write-Error $failure -ErrorAction Continue
     exit 99
 }
 '@

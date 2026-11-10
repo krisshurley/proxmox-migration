@@ -26,6 +26,7 @@ function Get-VMwareCleanupPlan {
     $CurrentBoot=Convert-VMwareCleanupBootId $CurrentBoot
     switch($Stage){
         'ReadyForMsi' {return 'Msi'}
+        'ReadyForResiduals' {return 'Residuals'}
         'AwaitingMsiReboot' {if($SavedBoot -eq $CurrentBoot){return 'RestartRequired'};return 'Residuals'}
         'AwaitingResidualReboot' {if($SavedBoot -eq $CurrentBoot){return 'RestartRequired'};return 'Verify'}
         {$_ -in @('Complete','VerificationPending','VerificationFailed')} {return 'Verify'}
@@ -40,6 +41,16 @@ function Write-VMwareCleanupState {
         $State|ConvertTo-Json -Depth 8|Set-Content -LiteralPath $temp -Encoding UTF8 -ErrorAction Stop
         Move-Item -LiteralPath $temp -Destination $Path -Force -ErrorAction Stop
     } finally {if(Test-Path -LiteralPath $temp){Remove-Item -LiteralPath $temp -ErrorAction SilentlyContinue}}
+}
+function Get-VMwareCleanupWorkerError {
+    param([string]$ErrorPath,[string]$Fallback)
+    if (Test-Path -LiteralPath $ErrorPath) {
+        try {
+            $errorRecord=Get-Content -LiteralPath $ErrorPath -Raw -ErrorAction Stop|ConvertFrom-Json -ErrorAction Stop
+            return "$Fallback $($errorRecord.message) Error evidence: $ErrorPath"
+        } catch { }
+    }
+    return "$Fallback Error evidence (if created): $ErrorPath"
 }
 function Get-VMwareCleanupProducts {
     foreach($root in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')){
@@ -65,6 +76,9 @@ function Assert-VMwareResidualAudit {
     foreach($field in @('Products','Drivers','Services','Packages')){
         if($null -eq $Inventory.PSObject.Properties[$field]){throw "Missing audit field: $field"}
         if(@($Inventory.$field).Count){throw "Residual audit still contains $field. Review the audit report."}
+    }
+    if ($Inventory.PSObject.Properties['EligibleDeviceCount'] -and [int]$Inventory.EligibleDeviceCount -gt 0) {
+        throw 'Residual audit still contains eligible absent VMware devices. Review the audit report.'
     }
 }
 function Get-MigrationToolsCleanupChoice {
@@ -167,7 +181,9 @@ function Save-MigrationStep3Approval {
 function Clear-MigrationStep3Approval {
     param([string]$StateDirectory)
     if ($StateDirectory) {
-        $path=Join-Path $StateDirectory 'Step3Approval.json'
-        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -Confirm:$false -ErrorAction Stop }
+        foreach($name in @('Step3Approval.json','OfflineDiskChoice.json')) {
+            $path=Join-Path $StateDirectory $name
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -Confirm:$false -ErrorAction Stop }
+        }
     }
 }
