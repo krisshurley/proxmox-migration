@@ -57,7 +57,7 @@ try{
         $errorPath=Join-Path $root ('msi-error-'+[guid]::NewGuid().ToString('N')+'.json')
         $state.stage='MsiInProgress';$state.msiRun=Join-Path $root ('MSI-'+[guid]::NewGuid().ToString('N'))
         Write-VMwareCleanupState $statePath $state
-        $code=Invoke-MigrationChildScript (Join-Path $PSScriptRoot 'VMwareToolsCleanup\Invoke-MsiUninstall.ps1') @{
+        $code=Invoke-MigrationChildScript (Join-Path $PSScriptRoot 'Invoke-VMwareToolsMsiUninstall.ps1') @{
             Uninstall=$true;SkipGuestHandlerRestore=$true;FirstbootNotUsed=$firstbootNotUsed;BackupRoot=$state.msiRun
         } -ErrorPath $errorPath
         if($code -ne 0){throw (Get-VMwareCleanupWorkerError $errorPath "MSI worker failed (exit $code); review $($state.msiRun).") }
@@ -75,7 +75,7 @@ try{
         $errorPath=Join-Path $root ('residual-error-'+[guid]::NewGuid().ToString('N')+'.json')
         $state.stage='ResidualsInProgress';$state.residualRun=Join-Path $root ('Residuals-'+[guid]::NewGuid().ToString('N'))
         Write-VMwareCleanupState $statePath $state
-        $code=Invoke-MigrationChildScript (Join-Path $PSScriptRoot 'VMwareToolsCleanup\Remove-Residuals.ps1') @{
+        $code=Invoke-MigrationChildScript (Join-Path $PSScriptRoot 'Remove-VMwareToolsResiduals.ps1') @{
             Mode='Cleanup';FirstbootNotUsed=$firstbootNotUsed;BackupRoot=$state.residualRun
         } -ErrorPath $errorPath
         if($code -ne 0){throw (Get-VMwareCleanupWorkerError $errorPath "Residual cleanup worker failed (exit $code); review $($state.residualRun).") }
@@ -90,7 +90,7 @@ try{
         $state.verificationRun=Join-Path $root ('Verify-'+[guid]::NewGuid().ToString('N'))
         $auditRoot=Join-Path $state.verificationRun 'ResidualAudit'
         $errorPath=Join-Path $root ('audit-error-'+[guid]::NewGuid().ToString('N')+'.json')
-        $code=Invoke-MigrationChildScript (Join-Path $PSScriptRoot 'VMwareToolsCleanup\Remove-Residuals.ps1') @{
+        $code=Invoke-MigrationChildScript (Join-Path $PSScriptRoot 'Remove-VMwareToolsResiduals.ps1') @{
             Mode='Audit';FirstbootNotUsed=$firstbootNotUsed;BackupRoot=$auditRoot
         } -ErrorPath $errorPath
         if($code -ne 0){throw (Get-VMwareCleanupWorkerError $errorPath "Residual audit failed (exit $code).") }
@@ -98,7 +98,7 @@ try{
         Assert-VMwareResidualAudit $inventory
         $finalRoot=Join-Path $state.verificationRun 'Final'
         $errorPath=Join-Path $root ('final-error-'+[guid]::NewGuid().ToString('N')+'.json')
-        $code=Invoke-MigrationChildScript (Join-Path $PSScriptRoot 'VMwareToolsCleanup\Test-FinalState.ps1') @{ReportRoot=$finalRoot} -ErrorPath $errorPath
+        $code=Invoke-MigrationChildScript (Join-Path $PSScriptRoot 'Test-VMwareToolsFinalState.ps1') @{ReportRoot=$finalRoot} -ErrorPath $errorPath
         if($code -ne 0){throw (Get-VMwareCleanupWorkerError $errorPath "Final checks worker failed (exit $code).") }
         $checks=@(Read-VMwareCleanupSingleJson $finalRoot 'final-checks.json')
         if($checks.Count -ne 8 -or @($checks|Where-Object Status -ne 'PASS').Count){throw 'Final checks contain review items, failed reads or missing checks.'}

@@ -7,7 +7,7 @@ $count=0
 function Assert($value,$message){if(-not $value){throw $message}}
 function Throws([scriptblock]$run){$caught=$false;try{& $run|Out-Null}catch{$caught=$true};Assert $caught 'Expected blocked package'}
 function Case($name,[scriptblock]$run){& $run;$script:count++;Write-Host "PASS $name"}
-$t=$null;$e=$null;$ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'VMwareToolsCleanup/Invoke-MsiUninstall.ps1'),[ref]$t,[ref]$e)
+$t=$null;$e=$null;$ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'Invoke-VMwareToolsMsiUninstall.ps1'),[ref]$t,[ref]$e)
 Assert ($e.Count -eq 0) 'MSI worker syntax error'
 foreach($fn in $ast.FindAll({param($n)$n -is [Management.Automation.Language.FunctionDefinitionAst]},$true)){
     Set-Item "function:script:$($fn.Name)" ([scriptblock]::Create($fn.Body.Extent.Text.Substring(1,$fn.Body.Extent.Text.Length-2)))

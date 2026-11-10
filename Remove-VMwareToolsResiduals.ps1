@@ -325,7 +325,7 @@ try {
     # Audit is read-only and must not be blocked by an idle Firstboot wrapper.
     # Mutating modes reuse the migration gate, including its verified-idle check.
     if ($Mode -ne 'Audit' -and ($firstboot.Count -or (Test-Path 'C:\Program Files\Guestfs\Firstboot'))) {
-        $common = Join-Path (Split-Path -Parent $PSScriptRoot) 'Migration.Common.ps1'
+        $common = Join-Path $PSScriptRoot 'Migration.Common.ps1'
         if (-not (Test-Path -LiteralPath $common)) {
             throw 'Place this utility beside Migration.Common.ps1 from the supplied migration test package.'
         }

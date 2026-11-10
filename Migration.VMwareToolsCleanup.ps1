@@ -149,7 +149,6 @@ function Get-MigrationStep3ApprovalContext {
     }
     $runtime=[ordered]@{}
     $scripts=@(Get-ChildItem -LiteralPath $ScriptDirectory -Filter '*.ps1' -File -ErrorAction Stop)
-    $scripts+=@(Get-ChildItem -LiteralPath (Join-Path $ScriptDirectory VMwareToolsCleanup) -Filter '*.ps1' -File -ErrorAction Stop)
     foreach($file in @($scripts|Sort-Object FullName)) {
         $relative=$file.FullName.Substring($ScriptDirectory.TrimEnd('/','\').Length).TrimStart('/','\') -replace '\\','/'
         $runtime[$relative]=(Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash

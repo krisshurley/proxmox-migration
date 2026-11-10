@@ -1,8 +1,8 @@
 # Användarguide: flytta en Windows-VM från VMware till Proxmox
 
-> **Utvecklingsbranch `dev` – nytt testflöde i steg 3.** Steg 1 och 2 använder samma förberedelser som tidigare. Menyscriptet aktiverar här en ny VMware Tools-avinstallation som sparar status och fortsätter när du kör steg 3 igen efter manuell omstart. MSI-vägen har ingen fast versionsspärr: produktidentitet, kända installationsåtgärder och deras DLL-referenser kontrolleras i det aktuella paketet. Okända eller tvetydiga upplägg stoppas utan MSI-ändring. Läs [testinstruktionen](VMwareToolsCleanup/README.md). Det tidigare sammanhängande flödet har provats med Tools 13.0.10; det nya dynamiska åtgärdsurvalet behöver nu provas på Windows, särskilt med andra versioner. Ingen Microsoft-felsökare används och inga automatiska omstarter eller schemalagda aktiviteter skapas.
+> **Utvecklingsbranch `dev` – nytt testflöde i steg 3.** Steg 1 och 2 använder samma förberedelser som tidigare. Menyscriptet aktiverar här en ny VMware Tools-avinstallation som sparar status och fortsätter när du kör steg 3 igen efter manuell omstart. MSI-vägen har ingen fast versionsspärr: produktidentitet, kända installationsåtgärder och deras DLL-referenser kontrolleras i det aktuella paketet. Okända eller tvetydiga upplägg stoppas utan MSI-ändring. Läs [testinstruktionen](VMwareToolsCleanup.md). Det tidigare sammanhängande flödet har provats med Tools 13.0.10; det nya dynamiska åtgärdsurvalet behöver nu provas på Windows, särskilt med andra versioner. Ingen Microsoft-felsökare används och inga automatiska omstarter eller schemalagda aktiviteter skapas.
 >
-> Vid test av en annan Tools-version kan MSI-paketet först granskas utan avinstallation: `.\VMwareToolsCleanup\Invoke-MsiUninstall.ps1 -SkipGuestHandlerRestore`. Kör på Proxmox-VM:en i administrativ 64-bitars Windows PowerShell 5.1, med QEMU Guest Agent igång, färdig Firstboot och frisk PCI VirtIO SCSI-kontroller. Endast rapporter skrivs. `inspection.json` visar produkt/version, paketets åtgärder, planerade ändringar och om upplägget accepterades. Ett annat versionsnummer är ingen garanti för kompatibilitet. En saknad enskild åtgärd behöver inte tas bort; om inga kända åtgärder finns krävs manuell hantering.
+> Vid test av en annan Tools-version kan MSI-paketet först granskas utan avinstallation: `.\Invoke-VMwareToolsMsiUninstall.ps1 -SkipGuestHandlerRestore`. Kör på Proxmox-VM:en i administrativ 64-bitars Windows PowerShell 5.1, med QEMU Guest Agent igång, färdig Firstboot och frisk PCI VirtIO SCSI-kontroller. Endast rapporter skrivs. `inspection.json` visar produkt/version, paketets åtgärder, planerade ändringar och om upplägget accepterades. Ett annat versionsnummer är ingen garanti för kompatibilitet. En saknad enskild åtgärd behöver inte tas bort; om inga kända åtgärder finns krävs manuell hantering.
 
 > Efter första körningen av steg 3: starta om när rapporten begär det och kör sedan steg 3 igen. Efter efterstädningen behövs ytterligare en manuell omstart och steg 3 för slutkontrollen. Behåll exportmappen, `VMwareToolsCleanup\Workflow.json` och alla backuper. Ett fel eller en avbruten MSI-körning återförs inte automatiskt. För en ny migration kan tidigare städväg väljas med `.\Migrate-VmwareToProxmox.ps1 -UseExtendedToolsCleanup:$false`. En redan påbörjad ny körning kan inte hoppas över med flaggan.
 
@@ -224,6 +224,8 @@ Om betrodda, nedladdade filer är blockerade kan du avblockera dem i skriptmappe
 ```powershell
 Unblock-File *
 ```
+
+Paketets körfiler, inklusive VMware-städningens tre underscript, ligger i huvudmappen. Kör därför `Unblock-File *` där efter uppackning av det betrodda paketet. Exportens loggar, backuper och sparade städstatus ligger kvar på sina tidigare platser.
 
 Om PowerShells körningspolicy blockerar skript kan du, om er lokala policy medger
 det, tillåta körning för just det aktuella PowerShell-fönstret:

@@ -150,7 +150,7 @@ try {
     $computer=Get-CimInstance Win32_ComputerSystem
     if($computer.Manufacturer -notmatch 'QEMU|Red Hat' -and $computer.Model -notmatch 'QEMU|KVM'){throw 'Only run on the restored QEMU/KVM test VM.'}
     if((Get-Service QEMU-GA).Status -ne 'Running'){throw 'QEMU Guest Agent must be running.'}
-    $common=Join-Path (Split-Path -Parent $PSScriptRoot) 'Migration.Common.ps1'
+    $common=Join-Path $PSScriptRoot 'Migration.Common.ps1'
     if(-not (Test-Path -LiteralPath $common)){throw 'Place this file beside Migration.Common.ps1 from the test package.'}
     . $common
     $null=Assert-MigrationFirstbootComplete -FirstbootNotUsed:$FirstbootNotUsed

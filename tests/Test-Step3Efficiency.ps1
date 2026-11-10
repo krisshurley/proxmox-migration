@@ -15,7 +15,7 @@ function Import-Functions($file,$names){
     }
 }
 Import-Functions Restore-And-TestMigrationState.ps1 @('Test-MappedNetworkAlreadyRestored','Restore-Network','Complete-PendingToolsCleanupReport','Complete-PostMigrationNetworkChecks')
-Import-Functions VMwareToolsCleanup/Remove-Residuals.ps1 @('Get-CleanupDeviceBindings')
+Import-Functions Remove-VMwareToolsResiduals.ps1 @('Get-CleanupDeviceBindings')
 function Fixture {
     $script:source=[pscustomobject]@{interfaceIndex=6;dhcpEnabled=$false;dnsAutomatic=$false;dnsSuffix='example.test';registerThisConnectionAddress=$true;useSuffixWhenRegistering=$false;interfaceMetric=15;dnsServers=@('192.0.2.2','192.0.2.3');ipv4Addresses=@([pscustomobject]@{address='192.0.2.10';prefixLength=24});defaultGateways=@('192.0.2.1')}
     $script:actual=$source|ConvertTo-Json -Depth 6|ConvertFrom-Json

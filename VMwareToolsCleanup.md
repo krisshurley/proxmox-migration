@@ -24,11 +24,11 @@ An existing extended workflow is always resumed/reviewed; the flag does not bypa
 
 ## Components
 
-- `../Invoke-VMwareToolsCleanup.ps1`: workflow, target/Firstboot checks, exclusive execution lock, persistent checkpoints and worker orchestration.
-- `../Migration.VMwareToolsCleanup.ps1`: pure state/identity/verification helpers.
-- `Invoke-MsiUninstall.ps1`: backed-up transactional MSI modification and logged uninstall. Default standalone invocation is inspection only. Writes require explicit `-Uninstall`; skipping Guest Handler restoration additionally requires `-SkipGuestHandlerRestore`.
-- `Remove-Residuals.ps1`: Audit/Cleanup only. Requires absent Tools product/service registrations, stopped VMware drivers and verified absent devices. Dynamically identifies published packages, exports them before removal, uses no `/force`, and preserves Microsoft PCI bridges/controllers and the current Microsoft mouse driver. Does not change file ownership/ACLs or forcibly delete protected SYS files.
-- `Test-FinalState.ps1`: read-only COM+, startup, process, product registration, scoped Guest Handler and directory checks. Only report files are written. The workflow also reruns the driver/package audit.
+- `Invoke-VMwareToolsCleanup.ps1`: workflow, target/Firstboot checks, exclusive execution lock, persistent checkpoints and worker orchestration.
+- `Migration.VMwareToolsCleanup.ps1`: pure state/identity/verification helpers.
+- `Invoke-VMwareToolsMsiUninstall.ps1`: backed-up transactional MSI modification and logged uninstall. Default standalone invocation is inspection only. Writes require explicit `-Uninstall`; skipping Guest Handler restoration additionally requires `-SkipGuestHandlerRestore`.
+- `Remove-VMwareToolsResiduals.ps1`: Audit/Cleanup only. Requires absent Tools product/service registrations, stopped VMware drivers and verified absent devices. Dynamically identifies published packages, exports them before removal, uses no `/force`, and preserves Microsoft PCI bridges/controllers and the current Microsoft mouse driver. Does not change file ownership/ACLs or forcibly delete protected SYS files.
+- `Test-VMwareToolsFinalState.ps1`: read-only COM+, startup, process, product registration, scoped Guest Handler and directory checks. Only report files are written. The workflow also reruns the driver/package audit.
 
 No Microsoft `.diagcab`, unattended troubleshooting wrapper, manual mouse-switch prototype or third-party cleanup script is included. The successful MSI path removed the active VMware mouse and balloon drivers in the test; a separate manual Device Manager change was not required.
 
@@ -43,7 +43,7 @@ Missing individual roles are accepted; no fabricated action names are deleted. U
 Inspect a target's package first, without uninstalling or modifying MSI/service/driver/network configuration:
 
 ```powershell
-.\VMwareToolsCleanup\Invoke-MsiUninstall.ps1 -SkipGuestHandlerRestore
+.\Invoke-VMwareToolsMsiUninstall.ps1 -SkipGuestHandlerRestore
 ```
 
 Use elevated 64-bit Windows PowerShell 5.1 on Proxmox; the target/Firstboot/agent/storage gates still apply. Inspection writes evidence only. `inspection.json` records actual package identity, all action rows, the selected plan and `RecognizedLayout`/`Blocked` status with an error explanation when action validation fails. Early identity/environment failures are in the transcript. Default inspection never opens the MSI for writing.
@@ -95,3 +95,7 @@ New workflows without a registered Tools product start in `ReadyForResiduals`, r
 The interactive menu offers `[y/N]` only for uniquely matched captured data disks. Default/No and noninteractive invocation leave disks unchanged; an explicit `-RepairOfflineDisks` opts in using the same guarded plan. Approval is saved in `OfflineDiskChoice.json` for the capture/VM during restart continuations, is included in the effective step-3 approval options and is cleared at completion/cancellation/handled failure. WhatIf does not save consent or change disks.
 
 New captures add persistent disk GUID/signature fields without changing schema version or source preparation. Old captures use a preserved UniqueId/serial or a uniquely matching size/style/partition layout. Disk numbers alone never establish identity; two indistinguishable legacy layouts are left offline. Boot/system, RAW, unhealthy and ambiguous/unmatched disks are excluded. The child rechecks the current disk set, uniqueness and identity before writes, backs up before-state, then clears read-only/sets online and verifies the result. No SAN policy change, initialization, formatting, drive-letter assignment or automatic SQL/application-service start is performed.
+
+## Runtime script location
+
+All three cleanup workers are in the package root beside `Migrate-VmwareToProxmox.ps1` and `Migration.Common.ps1`. After extracting a trusted package, run `Unblock-File *` from that root as before. Cleanup documentation is kept in this root-level `VMwareToolsCleanup.md`; no separate runtime subdirectory is required. The capture's separate `State/VMwareToolsCleanup/` directory still holds workflow state, logs and backups; it is not moved or reset. Existing `Failed` states remain blocked for review.

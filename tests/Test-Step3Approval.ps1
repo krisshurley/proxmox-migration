@@ -17,11 +17,11 @@ function Get-NetAdapter {
 }
 $temp=Join-Path ([IO.Path]::GetTempPath()) ('step3-approval-tests-'+[guid]::NewGuid().ToString('N'))
 $state=Join-Path $temp State;$scripts=Join-Path $temp Scripts
-New-Item -ItemType Directory $state,(Join-Path $state VMwareToolsCleanup),(Join-Path $scripts VMwareToolsCleanup)|Out-Null
+New-Item -ItemType Directory $state,(Join-Path $state VMwareToolsCleanup),$scripts|Out-Null
 'capture'|Set-Content (Join-Path $state PreMigrationState.json)
 'network'|Set-Content (Join-Path $state NetworkConfiguration.json)
 'runtime'|Set-Content (Join-Path $scripts Migrate-VmwareToProxmox.ps1)
-'worker'|Set-Content (Join-Path $scripts 'VMwareToolsCleanup/Invoke-MsiUninstall.ps1')
+'worker'|Set-Content (Join-Path $scripts 'Invoke-VMwareToolsMsiUninstall.ps1')
 function Context { Get-MigrationStep3ApprovalContext $state $script:options $scripts }
 function Set-FixtureWorkflow($stage,$identity) {
     [pscustomobject]@{schemaVersion=1;identity=$identity;stage=$stage}|ConvertTo-Json|Set-Content (Join-Path $state 'VMwareToolsCleanup/Workflow.json')

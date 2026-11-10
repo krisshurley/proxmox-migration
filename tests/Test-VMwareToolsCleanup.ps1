@@ -18,8 +18,8 @@ function Import-Functions([string]$File,[string[]]$Names){
 function Test-Case([string]$Name,[scriptblock]$Body){& $Body;$script:Passed++;Write-Host "PASS $Name"}
 Import-Functions 'Migration.VMwareToolsCleanup.ps1' @('Assert-VMwareCleanupIdentity','Convert-VMwareCleanupBootId','Get-VMwareCleanupPlan','Write-VMwareCleanupState','Read-VMwareCleanupSingleJson','Assert-VMwareResidualAudit','Get-VMwareCleanupWorkerError')
 Import-Functions 'Migration.Common.ps1' @('Get-MigrationProperty')
-Import-Functions 'VMwareToolsCleanup/Invoke-MsiUninstall.ps1' @('Assert-MsiIdentity','Get-ValidatedActionPlan')
-Import-Functions 'VMwareToolsCleanup/Remove-Residuals.ps1' @('Test-CleanupDevice','Read-DeviceProperty')
+Import-Functions 'Invoke-VMwareToolsMsiUninstall.ps1' @('Assert-MsiIdentity','Get-ValidatedActionPlan')
+Import-Functions 'Remove-VMwareToolsResiduals.ps1' @('Test-CleanupDevice','Read-DeviceProperty')
 $testRoot=Join-Path ([IO.Path]::GetTempPath()) ('tools-workflow-tests-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory $testRoot|Out-Null
 try{
@@ -179,13 +179,15 @@ $method=Get-MigrationCapturedMethod $StateDirectory
     $script:FailWorker=$false;$script:FailVerification=$false
     function Invoke-MigrationChildScript {
         param($Path,$Arguments)
-        if($Path -match 'Invoke-MsiUninstall|Remove-Residuals'){ Assert-True ([bool]$Arguments.FirstbootNotUsed -eq ($script:FixtureMethod -eq 'DirectImport')) 'Wrong Firstboot flag forwarded to worker' }
-        if($Path -match 'Invoke-MsiUninstall'){
+        Assert-True (Test-Path -LiteralPath $Path -PathType Leaf) "Worker file not found: $Path"
+        Assert-True ((Split-Path -Parent $Path) -eq $script:RepositoryRoot) 'Runtime worker was not in the root directory'
+        if($Path -match 'Invoke-VMwareToolsMsiUninstall|Remove-VMwareToolsResiduals'){ Assert-True ([bool]$Arguments.FirstbootNotUsed -eq ($script:FixtureMethod -eq 'DirectImport')) 'Wrong Firstboot flag forwarded to worker' }
+        if($Path -match 'Invoke-VMwareToolsMsiUninstall'){
             $script:Calls.Add('MSI');if($script:FailWorker){return 99}
             New-Item -ItemType Directory $Arguments.BackupRoot -Force|Out-Null
             [pscustomobject]@{ExitCode=3010;MSIPatched=$true;GuestHandlerRestoreSkipped=($script:FixtureToolsVersion -eq '13.0.10.0')}|ConvertTo-Json|Set-Content (Join-Path $Arguments.BackupRoot 'result.json');return 0
         }
-        if($Path -match 'Remove-Residuals'){
+        if($Path -match 'Remove-VMwareToolsResiduals'){
             $script:Calls.Add('Residual-'+$Arguments.Mode)
             if($Arguments.Mode -eq 'Audit'){
                 New-Item -ItemType Directory $Arguments.BackupRoot -Force|Out-Null
@@ -193,7 +195,7 @@ $method=Get-MigrationCapturedMethod $StateDirectory
             }
             return 0
         }
-        if($Path -match 'Test-FinalState'){
+        if($Path -match 'Test-VMwareToolsFinalState'){
             $script:Calls.Add('Verify');New-Item -ItemType Directory $Arguments.ReportRoot -Force|Out-Null
             @(1..8|ForEach-Object {[pscustomobject]@{Status=$(if($script:FailVerification -and $_ -eq 1){'REVIEW'}else{'PASS'})}})|ConvertTo-Json|Set-Content (Join-Path $Arguments.ReportRoot 'final-checks.json');return 0
         }
